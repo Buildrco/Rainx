@@ -1068,13 +1068,13 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
           {/* Keep replies in one bounded vertical column with a single thread rail. */}
           {childReplies.length > 0 && (
             <>
-              <button onClick={() => setExpandedReplyThreads((prev) => ({ ...prev, [c.id]: !prev[c.id] }))} style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 8, padding: 0, background: "none", border: "none", color: T.gold, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              <button type="button" aria-expanded={!!expandedReplyThreads[c.id]} aria-label={expandedReplyThreads[c.id] ? "Hide replies" : "Show replies"} onClick={(e) => { e.stopPropagation(); setExpandedReplyThreads((prev) => ({ ...prev, [c.id]: !prev[c.id] })); }} style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 8, padding: 0, background: "none", border: "none", color: T.gold, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                 <MessageCircle size={15} strokeWidth={2} />
                 <span>{childReplies.length} {childReplies.length === 1 ? "reply" : "replies"}</span>
                 <ChevronDown size={14} style={{ transform: expandedReplyThreads[c.id] ? "rotate(180deg)" : "none", transition: "transform .18s" }} />
               </button>
               {expandedReplyThreads[c.id] && (
-                <div style={{ marginTop: 8, paddingLeft: 14, borderLeft: "2px dashed #CFD9DE", display: "grid", gap: 0 }}>
+                <div style={{ marginTop: 4, paddingLeft: 0, display: "grid", gap: 0 }}>
                   {childReplies.map((r) => renderCommentBlock(r, true, false))}
                 </div>
               )}
