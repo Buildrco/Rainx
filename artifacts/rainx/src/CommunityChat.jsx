@@ -1693,6 +1693,14 @@ export default function CommunityChat({ account, themeTokens, onClose, onViewPro
     return () => window.removeEventListener("popstate", onPop);
   }, []);
   const back=()=>{if(window.history.state?.rainxChatScreen)window.history.back();else closeRef.current?.();};
+  const openDM = (user) => {
+    if (!user?.id) return;
+    const nextState = { ...(window.history.state || {}), rainxChatScreen: "dm" };
+    window.history.pushState(nextState, "", window.location.href);
+    setDmUser(user);
+    setDmLeaving(false);
+    setScreen("dm");
+  };
   const backRef = useRef(back);
   backRef.current = back;
   useEffect(() => registerNativeBackHandler(() => {
