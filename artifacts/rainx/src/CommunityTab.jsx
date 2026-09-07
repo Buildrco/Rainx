@@ -1256,6 +1256,42 @@ function GiftIconButton({ profile, account }) {
   );
 }
 
+function LikeButton({ liked, count, onToggle, size = 16, detail = false, color }) {
+  const [burst, setBurst] = useState(null);
+  const burstTimer = useRef(null);
+  const burstId = useRef(0);
+
+  useEffect(() => () => clearTimeout(burstTimer.current), []);
+
+  const handlePress = (event) => {
+    event.stopPropagation();
+    if (!liked) {
+      const nextBurst = ++burstId.current;
+      setBurst(nextBurst);
+      clearTimeout(burstTimer.current);
+      burstTimer.current = setTimeout(() => setBurst(null), 1250);
+    }
+    onToggle(event);
+  };
+
+  return (
+    <button type="button" className="rx-like-button" onClick={handlePress} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: color || (liked ? T.rust : engAsh()), padding: 0 }}>
+      <span className="rx-love-burst" aria-hidden="true">
+        {burst != null && (
+          <>
+            <span key={burst + "-one"} className="rx-love-bubble rx-love-bubble-one">♥</span>
+            <span key={burst + "-two"} className="rx-love-bubble rx-love-bubble-two">♥</span>
+            <span key={burst + "-three"} className="rx-love-bubble rx-love-bubble-three">♥</span>
+            <span key={burst + "-four"} className="rx-love-bubble rx-love-bubble-four">♥</span>
+          </>
+        )}
+      </span>
+      <Heart size={size} strokeWidth={2} fill={liked ? T.rust : "none"} />
+      <span style={{ fontSize: detail ? 12 : 11.5, fontWeight: detail ? 700 : 600 }}>{formatCount(count)}</span>
+    </button>
+  );
+}
+
 function PostCard({ post, profile, account, profilesMap, onProfilesNeeded, likeData, onToggleLike, repostData, onToggleRepost, onOpenProfile, onOpenPost, onDelete, onHidePost, onEdit, onReport, onActivityOpen, onDmUser, forceOpen, onOpened }) {
   const [showComments, setShowComments] = useState(false);
   const [detailTarget, setDetailTarget] = useState("post"); // "post" = visible wrapper/post, "original" = quoted original
@@ -1585,9 +1621,7 @@ function PostCard({ post, profile, account, profilesMap, onProfilesNeeded, likeD
       {post.poll_id && <PollWidget pollId={post.poll_id} account={account} />}
 
       <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 10 }}>
-        <button onClick={(e) => { e.stopPropagation(); onToggleLike(post.id, post.user_id); }} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: feedLikeData.likedByMe === true ? T.rust : ash }}>
-          <Heart size={16} strokeWidth={2} fill={feedLikeData.likedByMe === true ? T.rust : "none"}  /> <span style={{ fontSize: 11.5, fontWeight: 600 }}>{formatCount(feedLikeData.count)}</span>
-        </button>
+        <LikeButton liked={feedLikeData.likedByMe === true} count={feedLikeData.count} onToggle={() => onToggleLike(post.id, post.user_id)} size={16} color={feedLikeData.likedByMe === true ? T.rust : ash} />
         <button onClick={(e) => { e.stopPropagation(); setDetailTarget("post"); setShowComments(true); }} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: ash }}>
           <MessageCircle size={16} strokeWidth={2} /> <span style={{ fontSize: 11.5, fontWeight: 600 }}>{formatCount(feedCommentCount)}</span>
         </button>
@@ -1709,9 +1743,7 @@ function PostCard({ post, profile, account, profilesMap, onProfilesNeeded, likeD
             </div>
             <div style={{ padding:"8px 16px 10px", borderBottom:`1px solid ${T.cardBorder}` }}>
               <div style={{ display:"flex", alignItems:"center", gap:22 }}>
-                <button onClick={(e) => { e.stopPropagation(); onToggleLike(displayPostId, displayAuthorId); }} style={{ display:"flex", alignItems:"center", gap:5, background:"none", border:"none", cursor:"pointer", color:ld.likedByMe ? T.rust : ash }}>
-                  <Heart size={18} strokeWidth={2} fill={ld.likedByMe ? T.rust : "none"} /> <span style={{ fontSize:12, fontWeight:700 }}>{formatCount(ld.count)}</span>
-                </button>
+                <LikeButton liked={ld.likedByMe} count={ld.count} onToggle={() => onToggleLike(displayPostId, displayAuthorId)} size={18} detail color={ld.likedByMe ? T.rust : ash} />
                 <button onClick={(e) => { e.stopPropagation(); setShowRepostSheet(true); }} style={{ display:"flex", alignItems:"center", gap:5, background:"none", border:"none", cursor:"pointer", color:rd.repostedByMe ? T.sage : ash }}>
                   <Repeat2 size={18} strokeWidth={2} /> <span style={{ fontSize:12, fontWeight:700 }}>{formatCount(rd.count)}</span>
                 </button>
