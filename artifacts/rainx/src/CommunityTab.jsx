@@ -992,13 +992,32 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
 
   if (comments === null) return <div style={{ fontSize: 11, color: T.muted, padding: "8px 0" }}>Loading comments…</div>;
 
-  // Separate top-level comments from replies (grouped by parent).
-  // Falls back gracefully when parent_comment_id is absent (all comments are top-level).
-  const topLevel = (comments || []).filter((c) => !c.parent_comment_id);
+  // Normalize both native threaded rows and legacy fallback replies.
+  // Older rows can be stored as top-level "@handle reply" text when the parent
+  // column is unavailable; visually reattach those rows without changing data.
+  const normalizedComments = (comments || []).map((comment) => ({ ...comment }));
+  const topLevelCandidates = normalizedComments.filter((comment) => !comment.parent_comment_id);
+  const profileHandles = (profile) => [profile?.username, profile?.display_name, profile?.full_name]
+    .filter(Boolean)
+    .map((value) => String(value).replace(/^@/, "").replace(/\s+/g, "").toLowerCase());
+  topLevelCandidates.forEach((candidate) => {
+    const match = String(candidate.text || "").match(/^@([a-z0-9_.-]+)\s+/i);
+    if (!match) return;
+    const mentionedHandle = match[1].toLowerCase();
+    const parent = topLevelCandidates
+      .filter((possibleParent) => possibleParent.id !== candidate.id && new Date(possibleParent.created_at) <= new Date(candidate.created_at))
+      .filter((possibleParent) => profileHandles(profilesMap[possibleParent.user_id]).includes(mentionedHandle))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+    if (!parent) return;
+    candidate.parent_comment_id = parent.id;
+    candidate.text = String(candidate.text).replace(/^@[a-z0-9_.-]+\s+/i, "");
+    candidate._legacyReply = true;
+  });
+  const topLevel = normalizedComments.filter((comment) => !comment.parent_comment_id);
   const repliesByParent = {};
-  (comments || []).forEach((c) => {
-    if (c.parent_comment_id) {
-      (repliesByParent[c.parent_comment_id] = repliesByParent[c.parent_comment_id] || []).push(c);
+  normalizedComments.forEach((comment) => {
+    if (comment.parent_comment_id) {
+      (repliesByParent[comment.parent_comment_id] = repliesByParent[comment.parent_comment_id] || []).push(comment);
     }
   });
 
@@ -1051,7 +1070,7 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
             <>
               <button onClick={() => setExpandedReplyThreads((prev) => ({ ...prev, [c.id]: !prev[c.id] }))} style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 8, padding: 0, background: "none", border: "none", color: T.gold, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                 <MessageCircle size={15} strokeWidth={2} />
-                <span>{childReplies.length} {childReplies.length === 1 ? "comment" : "comments"}</span>
+                <span>{childReplies.length} {childReplies.length === 1 ? "reply" : "replies"}</span>
                 <ChevronDown size={14} style={{ transform: expandedReplyThreads[c.id] ? "rotate(180deg)" : "none", transition: "transform .18s" }} />
               </button>
               {expandedReplyThreads[c.id] && (
@@ -1279,14 +1298,13 @@ function LikeButton({ liked, count, onToggle, size = 16, detail = false, color }
       <span className="rx-love-burst" aria-hidden="true">
         {burst != null && (
           <>
-            <span key={burst + "-one"} className="rx-love-bubble rx-love-bubble-one">♥</span>
-            <span key={burst + "-two"} className="rx-love-bubble rx-love-bubble-two">♥</span>
-            <span key={burst + "-three"} className="rx-love-bubble rx-love-bubble-three">♥</span>
-            <span key={burst + "-four"} className="rx-love-bubble rx-love-bubble-four">♥</span>
+            <Heart key={burst + "-one"} className="rx-love-bubble rx-love-bubble-one" size={11} strokeWidth={2.2} fill="currentColor" />
+            <Heart key={burst + "-two"} className="rx-love-bubble rx-love-bubble-two" size={9} strokeWidth={2.2} fill="currentColor" />
+            <Heart key={burst + "-three"} className="rx-love-bubble rx-love-bubble-three" size={10} strokeWidth={2.2} fill="currentColor" />
           </>
         )}
       </span>
-      <Heart size={size} strokeWidth={2} fill={liked ? T.rust : "none"} />
+      <Heart className={burst != null ? "rx-like-heart rx-like-heart-pop" : "rx-like-heart"} size={size} strokeWidth={2} fill={liked ? T.rust : "none"} />
       <span style={{ fontSize: detail ? 12 : 11.5, fontWeight: detail ? 700 : 600 }}>{formatCount(count)}</span>
     </button>
   );
