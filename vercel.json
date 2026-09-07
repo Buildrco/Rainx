@@ -30,69 +30,20 @@
           "value": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"
         }
       ]
-    },
-    {
-      "source": "/api/candles",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type"
-        }
-      ]
     }
   ],
   "rewrites": [
-    {
-      "source": "/api/mt5/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/mt5/:path*"
-    },
-    {
-      "source": "/api/signals/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/signals/:path*"
-    },
-    {
-      "source": "/api/scan/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/scan/:path*"
-    },
-    {
-      "source": "/api/chat",
-      "destination": "https://raina-ai-production-b247.up.railway.app/chat"
-    },
-    {
-      "source": "/api/price",
-      "destination": "https://raina-ai-production-b247.up.railway.app/price"
-    },
-    {
-      "source": "/api/symbols",
-      "destination": "https://raina-ai-production-b247.up.railway.app/symbols"
-    },
-    {
-      "source": "/api/history/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/history/:path*"
-    },
-    {
-      "source": "/api/push/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/push/:path*"
-    },
-    {
-      "source": "/api/webhook/:path*",
-      "destination": "https://raina-ai-production-b247.up.railway.app/webhook/:path*"
-    },
-    {
-      "source": "/api/community-ai",
-      "destination": "https://raina-ai-production-b247.up.railway.app/community/ai-reply"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
+    { "source": "/api/mt5/:path*",     "destination": "https://raina-ai-production-b247.up.railway.app/mt5/:path*" },
+    { "source": "/api/signals/:path*", "destination": "https://raina-ai-production-b247.up.railway.app/signals/:path*" },
+    { "source": "/api/scan/:path*",    "destination": "https://raina-ai-production-b247.up.railway.app/scan/:path*" },
+    { "source": "/api/chat",           "destination": "https://raina-ai-production-b247.up.railway.app/chat" },
+    { "source": "/api/price",          "destination": "https://raina-ai-production-b247.up.railway.app/price" },
+    { "source": "/api/symbols",        "destination": "https://raina-ai-production-b247.up.railway.app/symbols" },
+    { "source": "/api/history/:path*", "destination": "https://raina-ai-production-b247.up.railway.app/history/:path*" },
+    { "source": "/api/candles",        "destination": "https://raina-ai-production-b247.up.railway.app/candles" },
+    { "source": "/api/push/:path*",    "destination": "https://raina-ai-production-b247.up.railway.app/push/:path*" },
+    { "source": "/api/webhook/:path*", "destination": "https://raina-ai-production-b247.up.railway.app/webhook/:path*" },
+    { "source": "/api/community-ai",   "destination": "https://raina-ai-production-b247.up.railway.app/community/ai-reply" },
+    { "source": "/(.*)",               "destination": "/index.html" }
   ]
 }
