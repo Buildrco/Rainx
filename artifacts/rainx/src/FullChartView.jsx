@@ -112,7 +112,7 @@ export default function FullChartView({ inst, session, signalsMap = {}, themeMod
 
   // Chart state
   const [activeTf, setActiveTf] = useState("15m");
-  const [candles,  setCandles]  = useState([]);
+  const [candles,  setCandles]  = useState(() => (Array.isArray(fallbackCandles) ? fallbackCandles : []));
   const [loading,  setLoading]  = useState(false);
   const [price,    setPrice]    = useState(null);
   const [ohlc,     setOhlc]     = useState(null); // from crosshair
@@ -164,6 +164,12 @@ export default function FullChartView({ inst, session, signalsMap = {}, themeMod
   const fetchAbortRef      = useRef(null);
   const fetchRequestRef    = useRef(0);
   fallbackCandlesRef.current = fallbackCandles;
+  useEffect(() => {
+    if (!candles.length && Array.isArray(fallbackCandles) && fallbackCandles.length) {
+      setCandles(fallbackCandles);
+    }
+  }, [fallbackCandles, candles.length]);
+
 
   // Keep activeTfRef in sync with activeTf state
   useEffect(() => { activeTfRef.current = activeTf; }, [activeTf]);
