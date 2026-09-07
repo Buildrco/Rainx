@@ -79,10 +79,6 @@
       "destination": "https://raina-ai-production-b247.up.railway.app/history/:path*"
     },
     {
-      "source": "/api/candles",
-      "destination": "https://raina-ai-production-b247.up.railway.app/candles"
-    },
-    {
       "source": "/api/push/:path*",
       "destination": "https://raina-ai-production-b247.up.railway.app/push/:path*"
     },
