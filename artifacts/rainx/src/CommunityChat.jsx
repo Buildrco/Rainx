@@ -15,6 +15,7 @@ import { supabase } from "./supabaseClient";
 import chatWallpaper from "./assets/chat-wallpaper.jpg";
 import { registerNativeBackHandler } from "./nativeBackStack";
 const API_BASE = "https://rainxapp.vercel.app";
+const dmMessageCache = new Map();
 const PRESENCE_EVENT = "RAINX_PRESENCE";
 
 function postRainxPresence(presence) {
@@ -609,6 +610,16 @@ function DMScreen({ account, otherUser, T, onBack, onViewProfile, onUnreadCleare
   const oid    = otherUser && otherUser.id;
   const convId = aid && oid ? [aid, oid].sort().join("_") : null;
 
+  // Keep the last hydrated conversation visible while the network reconciles.
+  useEffect(() => {
+    if (!convId) return;
+    const cached = dmMessageCache.get(convId);
+    if (cached?.length) {
+      setMessages(cached);
+      setLoading(false);
+    }
+  }, [convId]);
+
   // Keep the active conversation visible to the service worker so a message
   // being read on this screen never also becomes a phone alert.
   useEffect(() => {
@@ -655,12 +666,12 @@ function DMScreen({ account, otherUser, T, onBack, onViewProfile, onUnreadCleare
         .or(`and(sender_id.eq.${aid},receiver_id.eq.${oid}),and(sender_id.eq.${oid},receiver_id.eq.${aid})`)
         .order("created_at", { ascending: true }).limit(200);
       if (err) { setError(err.message); return; }
-      setMessages(prev => {
-        const pending = (prev || []).filter(m => m._pending);
-        const merged = [...(data || [])];
-        pending.forEach(m => { if (!merged.some(x => x.id === m.id || (x.content === m.content && x.sender_id === m.sender_id && m._pending))) merged.push(m); });
-        return merged.sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
-      });
+      const pending = (dmMessageCache.get(convId) || []).filter(m => m._pending);
+      const merged = [...(data || [])];
+      pending.forEach(m => { if (!merged.some(x => x.id === m.id || (x.content === m.content && x.sender_id === m.sender_id && m._pending))) merged.push(m); });
+      const hydrated = merged.sort((a,b) => new Date(a.created_at) - new Date(b.created_at));
+      dmMessageCache.set(convId, hydrated);
+      setMessages(hydrated);
       const unread = (data || []).filter(m => m.receiver_id === aid && !m.is_read);
       if (unread.length) {
         onUnreadCleared?.(unread.length);

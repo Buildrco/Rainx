@@ -1443,6 +1443,26 @@ class FullChartErrorBoundary extends React.Component {
   }
 }
 
+function NavAssetIcon({ kind, active }) {
+  const fill = active ? "#F4D35E" : "currentColor";
+  const paths = {
+    home: {
+      outline: "M219.31,108.68l-80-80a16,16,0,0,0-22.62,0l-80,80A15.87,15.87,0,0,0,32,120v96a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V160h32v56a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V120A15.87,15.87,0,0,0,219.31,108.68ZM208,208H160V152a8,8,0,0,0-8-8H104a8,8,0,0,0-8,8v56H48V120l80-80,80,80Z",
+      filled: "M224,120v96a8,8,0,0,1-8,8H160a8,8,0,0,1-8-8V164a4,4,0,0,0-4-4H108a4,4,0,0,0-4,4v52a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V120a16,16,0,0,1,4.69-11.31l80-80a16,16,0,0,1,22.62,0l80,80A16,16,0,0,1,224,120Z"
+    },
+    wallet: {
+      outline: "M216,64H56a8,8,0,0,1,0-16H192a8,8,0,0,0,0-16H56A24,24,0,0,0,32,56V184a24,24,0,0,0,24,24H216a16,16,0,0,0,16-16V80A16,16,0,0,0,216,64Zm0,128H56a8,8,0,0,1-8-8V78.63A23.84,23.84,0,0,0,56,80H216Zm-48-60a12,12,0,1,1,12,12A12,12,0,0,1,168,132Z",
+      filled: "M216,64H56a8,8,0,0,1,0-16H192a8,8,0,0,0,0-16H56A24,24,0,0,0,32,56V184a24,24,0,0,0,24,24H216a16,16,0,0,0,16-16V80A16,16,0,0,0,216,64Zm-36,80a12,12,0,1,1,12-12A12,12,0,0,1,180,144Z"
+    },
+    community: {
+      outline: "M244.8,150.4a8,8,0,0,1-11.2-1.6A51.6,51.6,0,0,0,192,128a8,8,0,0,1-7.37-4.89,8,8,0,0,1,0-6.22A8,8,0,0,1,192,112a24,24,0,1,0-23.24-30,8,8,0,1,1-15.5-4A40,40,0,1,1,219,117.51a67.94,67.94,0,0,1,27.43,21.68A8,8,0,0,1,244.8,150.4ZM190.92,212a8,8,0,1,1-13.84,8,57,57,0,0,0-98.16,0,8,8,0,1,1-13.84-8,72.06,72.06,0,0,1,33.74-29.92,48,48,0,1,1,58.36,0A72.06,72.06,0,0,1,190.92,212ZM128,176a32,32,0,1,0-32-32A32,32,0,0,0,128,176ZM72,120a8,8,0,0,0-8-8A24,24,0,1,1,87.24,82a8,8,0,1,0,15.5-4A40,40,0,1,0,37,117.51,67.94,67.94,0,0,0,9.6,139.19a8,8,0,1,0,12.8,9.61A51.6,51.6,0,0,1,64,128,8,8,0,0,0,72,120Z",
+      filled: "M64.12,147.8a4,4,0,0,1-4,4.2H16a8,8,0,0,1-7.8-6.17,8.35,8.35,0,0,1,1.62-6.93A67.79,67.79,0,0,1,37,117.51a40,40,0,1,1,66.46-35.8,3.94,3.94,0,0,1-2.27,4.18A64.08,64.08,0,0,0,64,144C64,145.28,64,146.54,64.12,147.8Zm182-8.91A67.76,67.76,0,0,0,219,117.51a40,40,0,1,0-66.46-35.8,3.94,3.94,0,0,0,2.27,4.18A64.08,64.08,0,0,1,192,144c0,1.28,0,2.54-.12,3.8a4,4,0,0,0,4,4.2H240a8,8,0,0,0,7.8-6.17,8.33,8.33,0,0,0-0.63-6.93A67.76,67.76,0,0,0,219,117.51Z"
+    }
+  };
+  const selected = paths[kind] || paths.home;
+  return <svg width="26" height="26" viewBox="0 0 256 256" aria-hidden="true"><path d={active ? selected.filled : selected.outline} fill={fill} /></svg>;
+}
+
 function CenterNavLogo({ active, onActivate }) {
   const [energized, setEnergized] = useState(false);
   const pulseTimeoutRef = useRef(null);
@@ -1554,6 +1574,8 @@ function MainAppContent({ account, onLogout }) {
     window.setTimeout(() => { setShowLogoutConfirm(false); setLogoutClosing(false); }, 300);
   };
 
+  const appRootRef = useRef(null);
+  const [navHidden, setNavHidden] = useState(false);
   const [tab, setTab] = useState(() => {
     const { tab: urlTab } = routeRead();
     if (urlTab && urlTab !== "space-coins") return urlTab === "markets" ? "wallet" : urlTab;
@@ -1574,6 +1596,27 @@ function MainAppContent({ account, onLogout }) {
     if (tab === "community" && !communityMounted) setCommunityMounted(true);
     if (tab === "scalping"  && !scalpingMounted)  setScalpingMounted(true);
   }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const node = appRootRef.current;
+    if (!node) return;
+    let previousTop = node.scrollTop;
+    let frame = 0;
+    const handleScroll = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const currentTop = node.scrollTop;
+        const delta = currentTop - previousTop;
+        if (tab !== "home" || currentTop <= 10) setNavHidden(false);
+        else if (delta > 2) setNavHidden(true);
+        else if (delta < -2) setNavHidden(false);
+        previousTop = currentTop;
+      });
+    };
+    node.addEventListener("scroll", handleScroll, { passive: true });
+    return () => { node.removeEventListener("scroll", handleScroll); if (frame) cancelAnimationFrame(frame); };
+  }, [tab]);
 
   // ── Telegram-style animated navigation ───────────────────────────────────
   const prevTabRef = useRef("home");
@@ -2677,7 +2720,7 @@ function MainAppContent({ account, onLogout }) {
 
   return (
     <PullToRefresh>
-      <div className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", overscrollBehaviorY: "none", touchAction: "pan-y", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+      <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", overscrollBehaviorY: "none", touchAction: "pan-y", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
         * { box-sizing: border-box; }
@@ -2919,29 +2962,17 @@ function MainAppContent({ account, onLogout }) {
       </div>}
 
       {!communityProfileOpen && !spaceCoinsScreen && (
-        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", zIndex: 100, background: T.card, opacity: 1, borderTop: `1px solid ${T.cardBorder}`, boxShadow: "0 -8px 24px rgba(0,0,0,0.12)", display: "flex", justifyContent: "space-around", padding: "6px 0 calc(20px + env(safe-area-inset-bottom))", "--rx-logo-bg": isDark ? "#000" : "#fff" }}>
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", zIndex: 100, background: T.card, opacity: navHidden && tab === "home" ? 0 : 1, transform: navHidden && tab === "home" ? "translate3d(0, calc(100% + 18px), 0)" : "translate3d(0, 0, 0)", pointerEvents: navHidden && tab === "home" ? "none" : "auto", willChange: "transform, opacity", transition: "transform .58s cubic-bezier(.22,1,.36,1), opacity .42s ease", borderTop: `1px solid ${T.cardBorder}`, boxShadow: "0 -8px 24px rgba(0,0,0,0.12)", display: "flex", justifyContent: "space-around", padding: "6px 0 calc(20px + env(safe-area-inset-bottom))", "--rx-logo-bg": isDark ? "#000" : "#fff" }}>
           {[
             { key: "home", label: "Home", icon: (active) => (
-               <svg width="24" height="24" viewBox="0 0 24 24" fill={active ? "url(#rxNavGold)" : "none"} stroke={active ? "none" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" fillRule="evenodd">
-                {/* House silhouette + door cutout so the door stays empty when filled */}
-                <path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z M9 21V12h6v9z"/>
-              </svg>
+               <NavAssetIcon kind="home" active={active} />
             )},
             { key: "wallet", label: "Wallet", icon: (active) => (
-              <svg width="24" height="24" viewBox="0 0 24 24" fill={active ? "url(#rxNavGold)" : "none"} stroke={active ? "none" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h12.5A2.5 2.5 0 0 1 21 7.5v9A2.5 2.5 0 0 1 18.5 19H6a2.5 2.5 0 0 1-2.5-2.5z"/>
-                <path d="M3.5 8h14.5a3 3 0 0 1 3 3v1.5h-5.5a2 2 0 0 0 0 4H21"/>
-                <circle cx="16.5" cy="14.5" r="0.9" fill="currentColor"/>
-              </svg>
+              <NavAssetIcon kind="wallet" active={active} />
             )},
             { key: "space-coins", center: true },
             { key: "community", label: "Community", icon: (active) => (
-              <svg width="24" height="24" viewBox="0 0 24 24" fill={active ? "url(#rxNavGold)" : "none"} stroke={active ? "none" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="9" cy="7" r="3"/>
-                <path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/>
-                <circle cx="18" cy="8" r="2.2"/>
-                <path d="M21 21v-1.5a3 3 0 0 0-2.2-2.9"/>
-              </svg>
+              <NavAssetIcon kind="community" active={active} />
             )},
             { key: "more", label: "More", icon: (active) => (
               <svg width="24" height="24" viewBox="0 0 24 24" fill={active ? "url(#rxNavGold)" : "none"} stroke={active ? "none" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">

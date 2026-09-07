@@ -407,6 +407,19 @@ async function compressToWebP(file) {
 // make the same like appear twice or temporarily disappear.
 const postLikeLocks = new Set();
 const pendingPostLikeOps = new Set();
+const POST_LIKE_CACHE_PREFIX = "rainx-post-like-state-v1:";
+const commentRowsCache = new Map();
+
+function readPostLikeCache(accountId) {
+  try { return JSON.parse(localStorage.getItem(POST_LIKE_CACHE_PREFIX + accountId) || "{}"); } catch { return {}; }
+}
+function writePostLikeCache(accountId, data) {
+  try {
+    const compact = {};
+    Object.entries(data || {}).forEach(([id, value]) => { compact[id] = value?.likedByMe === true; });
+    localStorage.setItem(POST_LIKE_CACHE_PREFIX + accountId, JSON.stringify(compact));
+  } catch {}
+}
 async function togglePostLike(postId, authorId, accountId, likeData, setLikeData) {
   const lockKey = `${accountId}:${postId}`;
   if (postLikeLocks.has(lockKey)) return;
@@ -415,6 +428,7 @@ async function togglePostLike(postId, authorId, accountId, likeData, setLikeData
   // Immediate feedback is local. Feed hydration/realtime is prevented from
   // replacing this optimistic value until the write has committed.
   setLikeData((d) => ({ ...d, [postId]: next }));
+  writePostLikeCache(accountId, { ...likeData, [postId]: next });
   postLikeLocks.add(lockKey);
   pendingPostLikeOps.add(lockKey);
   try {
@@ -843,7 +857,7 @@ function Composer({ account, onPosted, onClose, compact, themeTokens }) {
 
 // ---------- Comments (single level) ----------
 function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfilesNeeded, onOpenProfile, onCommentsChange }) {
-  const [comments, setComments] = useState(null);
+  const [comments, setComments] = useState(() => commentRowsCache.get(postId) || null);
   const [text, setText] = useState("");
   const [likeData, setLikeData] = useState({});
   const [replyTo, setReplyTo] = useState(null); // comment id being replied to (uses the main bottom box)
@@ -856,6 +870,7 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
   const load = useCallback(async () => {
     const { data } = await supabase.from("post_comments").select("*").eq("post_id", postId).order("created_at", { ascending: true });
     const rows = data || [];
+    commentRowsCache.set(postId, rows);
     setComments(rows);
     if (typeof onCommentsChange === "function") onCommentsChange(rows.length);
     onProfilesNeeded([...new Set(rows.map((r) => r.user_id))]);
@@ -2987,6 +3002,21 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
     const excludedPosts = new Set((notInterested || []).map(n => n.post_id));
     let rows = (data || []).filter(p => !excludedUsers.has(p.user_id) && !excludedPosts.has(p.id));
 
+    // Seed engagement from the last known local state before rendering.
+    // Server reconciliation below replaces it without a false unliked flash.
+    const cachedLikeState = readPostLikeCache(account.id);
+    setLikeData((prev) => {
+      const next = {};
+      rows.forEach((post) => {
+        const existing = prev[post.id];
+        next[post.id] = {
+          count: existing?.count ?? (Number(post.likes_count) || 0),
+          likedByMe: existing?.likedByMe ?? cachedLikeState[post.id] === true,
+        };
+      });
+      return next;
+    });
+
     // The base post query is the primary Community shell. Repost originals,
     // profile badges, and engagement state are enrichment and must not block
     // the first real feed render on Android.
@@ -3112,6 +3142,7 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
       };
     });
     setLikeData(ld);
+    writePostLikeCache(account.id, ld);
 
     // Repost data — use persisted reposts_count from DB, only scan rows to determine repostedByMe
     const rd = {};
