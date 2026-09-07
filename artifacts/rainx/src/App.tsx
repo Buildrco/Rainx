@@ -109,9 +109,48 @@ const APP_SURFACE = {
   touchAction: "pan-y",
 } as const;
 
+function installGlobalTouchFeedback() {
+  let pressed = null;
+  const findTarget = (origin) => {
+    const direct = origin?.closest?.("button, a, [role=\"button\"], [data-rainx-card]");
+    if (direct) return direct;
+    let node = origin;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement && window.getComputedStyle(node).cursor === "pointer") return node;
+      node = node.parentElement;
+    }
+    return null;
+  };
+  const press = (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const target = findTarget(event.target);
+    if (!target || target.matches(":disabled")) return;
+    if (pressed && pressed !== target) pressed.classList.remove("rx-touch-pressed");
+    pressed = target;
+    pressed.classList.add("rx-touch-interactive", "rx-touch-pressed");
+  };
+  const release = () => {
+    if (!pressed) return;
+    pressed.classList.remove("rx-touch-pressed");
+    pressed = null;
+  };
+  document.addEventListener("pointerdown", press, true);
+  window.addEventListener("pointerup", release, true);
+  window.addEventListener("pointercancel", release, true);
+  window.addEventListener("blur", release);
+  return () => {
+    document.removeEventListener("pointerdown", press, true);
+    window.removeEventListener("pointerup", release, true);
+    window.removeEventListener("pointercancel", release, true);
+    window.removeEventListener("blur", release);
+  };
+}
+
 export default function App() {
   const [route,setRoute]=useState(()=>readHash()),[account,setAccount]=useState(null),[authReady,setAuthReady]=useState(false),[lockReady,setLockReady]=useState(!Capacitor.isNativePlatform()),[locked,setLocked]=useState(false);
   const previousAccountId=useRef(null),forceLockOnNextAccountLoad=useRef(false);
+
+  useEffect(() => installGlobalTouchFeedback(), []);
 
   useEffect(()=>{
     const update=()=>setRoute(readHash());
