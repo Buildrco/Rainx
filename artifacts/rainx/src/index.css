@@ -783,7 +783,7 @@ html, body, #root { overscroll-behavior-y: none; }
 
 
 /* Native screen contract: opaque layers prevent the previous route flashing through. */
-html, body, #root { background: #0F0E0B; }
+html, body, #root { background: #F8F9FA; }
 .rx-app-surface { background: #0F0E0B; isolation: isolate; }
 .rx-referral-screen, .rx-native-screen, .rx-standalone-route { background: #0F0E0B; isolation: isolate; }
 .rx-referral-screen { animation: rx-native-screen-in 520ms cubic-bezier(.22,1,.36,1) both; }
@@ -802,19 +802,19 @@ button, a, [role="button"] { touch-action: manipulation; -webkit-tap-highlight-c
 .rx-like-heart { transform-origin: 50% 60%; }
 .rx-like-heart-pop { animation: rx-like-heart-pop 420ms cubic-bezier(0.22, 0.8, 0.2, 1); }
 .rx-love-burst { position: absolute; left: 50%; bottom: 50%; width: 1px; height: 1px; pointer-events: none; z-index: 4; }
-.rx-love-bubble { position: absolute; left: 0; top: 0; color: #C94A52; opacity: 0; filter: drop-shadow(0 1px 3px rgba(201, 74, 82, 0.16)); animation: rx-love-rise 860ms cubic-bezier(0.22, 0.72, 0.24, 1) forwards; }
-.rx-love-bubble-one { --rx-love-x: -12px; --rx-love-y: -25px; animation-delay: 0ms; }
-.rx-love-bubble-two { --rx-love-x: 10px; --rx-love-y: -35px; animation-delay: 55ms; }
-.rx-love-bubble-three { --rx-love-x: 17px; --rx-love-y: -18px; animation-delay: 95ms; }
+.rx-love-bubble { position: absolute; left: 0; top: 0; width: 18px; height: 18px; color: #C0392B; opacity: 0; filter: drop-shadow(0 2px 4px rgba(192, 57, 43, 0.22)); animation: rx-love-rise 1.45s cubic-bezier(0.22, 0.72, 0.24, 1) forwards; }
+.rx-love-bubble-one { --rx-love-x: -22px; --rx-love-y: -58px; animation-delay: 0ms; }
+.rx-love-bubble-two { --rx-love-x: 14px; --rx-love-y: -72px; animation-delay: 90ms; }
+.rx-love-bubble-three { --rx-love-x: 30px; --rx-love-y: -42px; animation-delay: 170ms; }
 @keyframes rx-like-heart-pop {
   0% { transform: scale(1); }
   42% { transform: scale(1.18); }
   100% { transform: scale(1); }
 }
 @keyframes rx-love-rise {
-  0% { opacity: 0; transform: translate(-50%, 2px) scale(0.55); }
-  24% { opacity: 0.72; transform: translate(-50%, -4px) scale(0.9); }
-  100% { opacity: 0; transform: translate(calc(-50% + var(--rx-love-x)), var(--rx-love-y)) scale(0.78); }
+  0% { opacity: 0; transform: translate(-50%, 8px) scale(0.55); }
+  18% { opacity: 1; transform: translate(-50%, 0) scale(1.08); }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--rx-love-x)), var(--rx-love-y)) scale(1.18); }
 }
 @media (prefers-reduced-motion: reduce) {
   .rx-touch-interactive { transition: none; }

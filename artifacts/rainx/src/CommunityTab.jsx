@@ -1041,11 +1041,12 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
     const ld = likeData[c.id] || { count: 0, likedByMe: false };
     const childReplies = isReply ? [] : flattenReplies(c.id).sort((a, b) => { const aMine = a.user_id === account.id; const bMine = b.user_id === account.id; return aMine === bMine ? 0 : aMine ? -1 : 1; });
     return (
-      <div key={c.id} style={{ display: "flex", gap: 12, width: "100%", marginBottom: 0, padding: isReply ? "12px 0" : "15px 0", background: "#FFFFFF", border: 0, borderRadius: 0, boxSizing: "border-box", marginLeft: 0, borderBottom: !isReply ? "1px solid #EFF3F4" : 0 }}>
-        <button onClick={() => onOpenProfile(c.user_id)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", flexShrink: 0 }}>
-          <Avatar name={p?.display_name} size={isReply ? 22 : 24} avatarUrl={p?.avatar_url} />
+      <div key={c.id} style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: isReply ? 10 : 12, width: "100%", marginBottom: 0, padding: isReply ? "11px 0 11px 28px" : "15px 0", background: "#FFFFFF", border: 0, borderRadius: 0, boxSizing: "border-box", marginLeft: 0, borderBottom: !isReply ? "1px solid #EFF3F4" : 0 }}>
+        {isReply && <span aria-hidden="true" style={{ position: "absolute", left: 8, top: 0, bottom: 0, width: 2, borderRadius: 2, background: "#D7DDE0" }} />}
+        <button onClick={() => onOpenProfile(c.user_id)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "flex-start" }}>
+          <Avatar name={p?.display_name} size={isReply ? 28 : 32} avatarUrl={p?.avatar_url} />
         </button>
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <button onClick={() => onOpenProfile(c.user_id)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}>
               <span style={{ fontSize: 15, fontWeight: 700, color: T.paper }}>{p?.full_name || p?.display_name || p?.username || <span style={{ color: T.muted }}>…</span>}</span>
@@ -1058,9 +1059,7 @@ function CommentsSection({ postId, postAuthorId, account, profilesMap, onProfile
             {(c.text || "").length > 220 && <button onClick={() => setExpandedCommentText((prev) => ({ ...prev, [c.id]: !prev[c.id] }))} style={{ background: "none", border: "none", padding: "0 0 0 5px", color: T.gold, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{expandedCommentText[c.id] ? "See less" : "See more"}</button>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 18, marginTop: 6 }}>
-            <button onClick={() => toggleCommentLike(c.id, c.user_id, postId, account.id, likeData, setLikeData)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: ld.likedByMe ? T.rust : engAsh() }}>
-              <Heart size={16} strokeWidth={2} fill={ld.likedByMe ? T.rust : "none"}  /> <span style={{ fontSize: 11.5, fontWeight: 600 }}>{ld.count}</span>
-            </button>
+            <LikeButton liked={ld.likedByMe} count={ld.count} onToggle={() => toggleCommentLike(c.id, c.user_id, postId, account.id, likeData, setLikeData)} size={16} detail color={ld.likedByMe ? T.rust : engAsh()} />
             <button onClick={() => startReply(c.id)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", color: engAsh() }}>
               <MessageCircle size={16} strokeWidth={2} /> <span style={{ fontSize: 11.5, fontWeight: 600 }}>Reply</span>
             </button>

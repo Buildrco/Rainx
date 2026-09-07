@@ -102,7 +102,7 @@ const APP_SURFACE = {
   height: "100dvh",
   minHeight: "100dvh",
   overflowX: "hidden",
-  background: "#0F0E0B",
+  background: "#F8F9FA",
   isolation: "isolate",
   overflowY: "hidden",
   overscrollBehavior: "none",
@@ -144,6 +144,17 @@ function installGlobalTouchFeedback() {
     window.removeEventListener("pointercancel", release, true);
     window.removeEventListener("blur", release);
   };
+}
+
+function NativeBootScreen() {
+  return (
+    <div style={{ ...APP_SURFACE, display: "grid", placeItems: "center", color: "#0F1419", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <div style={{ display: "grid", justifyItems: "center", gap: 10 }}>
+        <div style={{ width: 52, height: 52, borderRadius: 16, background: "#F4D35E", display: "grid", placeItems: "center", fontWeight: 900, fontSize: 19, boxShadow: "0 8px 24px rgba(244,211,94,.28)" }}>RX</div>
+        <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", color: "#536471" }}>RAINX</div>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
@@ -287,8 +298,8 @@ export default function App() {
 
   const isMoreLanding=route.tab==="more"&&!route.sub;
 
-  if(Capacitor.isNativePlatform()&&!authReady)return <div style={APP_SURFACE}/>;
-  if(Capacitor.isNativePlatform()&&account?.id&&!lockReady)return <div style={APP_SURFACE}/>;
+  if(Capacitor.isNativePlatform()&&!authReady)return <NativeBootScreen />;
+  if(Capacitor.isNativePlatform()&&account?.id&&!lockReady)return <NativeBootScreen />;
   if(Capacitor.isNativePlatform()&&account?.id&&locked)return <div style={APP_SURFACE}><NativeLockOverride account={account} initialLocked/></div>;
   if(account?.id&&isMoreLanding)return <div style={APP_SURFACE}><MoreLandingOverride account={account}/></div>;
   return <div style={APP_SURFACE}><RainXApp/><>{account?.id&&<NativeLockOverride account={account} initialLocked={false}/>}</></div>;

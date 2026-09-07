@@ -7409,6 +7409,17 @@ function sessionToAccount(session) {
   return { id: session.user.id, email: session.user.email, joinedAt: session.user.created_at };
 }
 
+function RainXBootScreen() {
+  return (
+    <div style={{ minHeight: "100dvh", background: "#F8F9FA", color: "#0F1419", display: "grid", placeItems: "center", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <div style={{ display: "grid", justifyItems: "center", gap: 12 }}>
+        <div style={{ width: 54, height: 54, borderRadius: 18, background: "#F4D35E", color: "#0F1419", display: "grid", placeItems: "center", fontWeight: 900, fontSize: 20, boxShadow: "0 8px 24px rgba(244,211,94,.28)" }}>RX</div>
+        <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".08em", color: "#536471" }}>RAINX</div>
+      </div>
+    </div>
+  );
+}
+
 export default function RainX() {
   const [account, setAccount] = useState(undefined); // undefined = loading, null = logged out
 
@@ -7426,7 +7437,7 @@ export default function RainX() {
     setAccount(null);
   };
 
-  if (account === undefined) return <div style={{ minHeight: "100dvh", background: T.ink }} />;
+  if (account === undefined) return <RainXBootScreen />;
   if (!account) return <><InstallBanner /><NewFeaturesPrompt /><AuthScreen onAuthed={(session) => setAccount(sessionToAccount(session))} /></>;
   return <><InstallBanner /><NewFeaturesPrompt /><MainApp account={account} onLogout={handleLogout} /></>;
 }

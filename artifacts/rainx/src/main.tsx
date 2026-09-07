@@ -11,9 +11,11 @@ createRoot(document.getElementById('root')!).render(<App />);
 // Offline app-shell caching is intentionally registered after the app mounts.
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js').catch((error) => {
-      console.warn('[RainX] offline shell unavailable', error);
-    });
+    void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+      .then((registration) => registration.update())
+      .catch((error) => {
+        console.warn('[RainX] offline shell unavailable', error);
+      });
   }, { once: true });
 }
 
