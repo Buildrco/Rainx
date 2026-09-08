@@ -71,6 +71,10 @@ function serializeSheet(root: HTMLElement) {
   clone.style.animation = 'none';
   clone.style.boxSizing = 'border-box';
   clone.style.width = '100%';
+  clone.style.height = 'auto';
+  clone.style.minHeight = '0';
+  clone.style.maxHeight = '92vh';
+  clone.style.overflowY = 'auto';
   clone.style.margin = '0';
   clone.className = clone.className
     .split(/\s+/)
@@ -99,9 +103,15 @@ function setNativeFieldValue(element: HTMLInputElement | HTMLTextAreaElement | H
 export function useNativeBottomSheet(
   sheetRef: React.RefObject<HTMLElement | null>,
   enabled: boolean,
+  onDismiss?: () => void,
 ) {
   const [nativeOpen, setNativeOpen] = React.useState(false);
   const mountedRef = React.useRef(true);
+  const onDismissRef = React.useRef(onDismiss);
+
+  React.useEffect(() => {
+    onDismissRef.current = onDismiss;
+  }, [onDismiss]);
 
   React.useEffect(() => {
     mountedRef.current = true;
@@ -129,9 +139,21 @@ export function useNativeBottomSheet(
       } else if ((payload.type === 'input' || payload.type === 'change') && node instanceof HTMLSelectElement) {
         setNativeFieldValue(node, payload.value);
       }
+      // Input events are already reflected in the native WebView. Reloading the
+      // document for every keystroke destroys focus and reopens the keyboard.
+      // Clicks and non-text changes represent React state transitions, so those
+      // are safe points to synchronize the snapshot.
+      if (payload.type === 'input') return;
       window.setTimeout(() => {
-        if (active && sheetRef.current) void NativeBottomSheet.update({ html: serializeSheet(sheetRef.current), baseUrl: window.location.origin + '/' }).catch(() => undefined);
-      }, 40);
+        if (active && sheetRef.current) {
+          void NativeBottomSheet.update({
+            html: serializeSheet(sheetRef.current),
+            baseUrl: window.location.origin + '/',
+          }).catch((error) => {
+            if (import.meta.env.DEV) console.error('[RainX] NativeBottomSheet update failed', error);
+          });
+        }
+      }, 50);
     };
 
     const onDismissed = () => {
@@ -139,20 +161,25 @@ export function useNativeBottomSheet(
       active = false;
       restoreWebSheet();
       const close = (sheetRef.current || root).querySelector<HTMLElement>('[data-rainx-native-close]');
-      close?.click();
+      if (close) close.click();
+      else onDismissRef.current?.();
     };
 
     const present = async () => {
       try {
         actionHandle = await NativeBottomSheet.addListener('action', onAction);
         dismissedHandle = await NativeBottomSheet.addListener('dismissed', onDismissed);
-        await NativeBottomSheet.present({ html: serializeSheet(root), baseUrl: window.location.origin + '/' });
-        if (!mountedRef.current) return;
-        active = true;
+        // Hide the web implementation before the dialog starts animating. If
+        // the plugin is unavailable, the catch block restores the fallback.
+        setNativeOpen(true);
         root.style.visibility = 'hidden';
         root.style.pointerEvents = 'none';
-        setNativeOpen(true);
-      } catch {
+        active = true;
+        await NativeBottomSheet.present({ html: serializeSheet(root), baseUrl: window.location.origin + '/' });
+        if (!mountedRef.current) return;
+      } catch (error) {
+        console.error('[RainX] NativeBottomSheet is unavailable; using the web fallback.', error);
+        active = false;
         restoreWebSheet();
       }
     };
