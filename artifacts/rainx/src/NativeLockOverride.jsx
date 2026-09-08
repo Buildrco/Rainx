@@ -215,7 +215,7 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
 
   const pinLength = Math.max(4, Math.min(6, Number(config.pinLength) || 4));
   const BioIcon = biometricIcon(biometryInfo);
-  const bioAvailable = !!config.biometricEnabled && !!biometryInfo?.isAvailable;
+  const bioAvailable = !!config.pinEnabled && !!config.biometricEnabled && !!biometryInfo?.isAvailable;
 
   if (config.pinRegistrationRequired) {
     return (
