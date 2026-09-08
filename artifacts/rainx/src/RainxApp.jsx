@@ -2425,9 +2425,33 @@ function MainAppContent({ account, onLogout }) {
 
   useEffect(() => { refreshTwoFactor(); }, [refreshTwoFactor]);
 
+  const copySecurityText = async (text, label) => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const area = document.createElement("textarea");
+        area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
+        document.body.appendChild(area); area.focus(); area.select(); document.execCommand("copy"); area.remove();
+      }
+      alert(label + " copied.");
+    } catch { alert("Could not copy " + label.toLowerCase() + "."); }
+  };
+
   const beginTwoFactorEnrollment = async () => {
     setTwoFactorLoading(true);
     try {
+      const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+      if (factorsError) throw factorsError;
+      const existing = factors?.totp || [];
+      const verified = existing.find(factor => factor.status === "verified");
+      if (verified) {
+        setTwoFactorFactor(verified);
+        alert("Two-step authentication is already enabled for this account.");
+        return;
+      }
+      for (const factor of existing.filter(item => item.status !== "verified")) {
+        await supabase.auth.mfa.unenroll({ factorId: factor.id });
+      }
       const { data, error } = await supabase.auth.mfa.enroll({
         factorType: "totp",
         friendlyName: "RainX Authenticator",
@@ -2506,7 +2530,30 @@ function MainAppContent({ account, onLogout }) {
       setPinError(error?.message || "Unable to save PIN securely.");
     }
   };
-  const setupPasskey = async () => {
+  const requestSecurityEmail = async (action) => {
+    if (!account?.email) { alert("A verified account email is required for this security change."); return; }
+    if (typeof supabase.auth.reauthenticate !== "function") {
+      const { error } = await supabase.auth.resetPasswordForEmail(account.email);
+      alert(error ? "Could not send the security email." : "A security email was sent. Complete it, then retry this change.");
+      return;
+    }
+    setSecurityEmailLoading(true);
+    try {
+      const { error } = await supabase.auth.reauthenticate();
+      if (error) throw error;
+      setSecurityReauthAction(action);
+      setSecurityEmailCode("");
+      setSecuritySheet("securityReauth");
+    } catch (error) {
+      alert(error?.message || "Could not send the security verification email.");
+    } finally { setSecurityEmailLoading(false); }
+  };
+
+  const setupPasskey = async (reauthenticated = false) => {
+    if (!reauthenticated && securityPrefs.biometricEnabled) {
+      await requestSecurityEmail("biometric");
+      return;
+    }
     try {
       const deviceConfig = await getNativeLockConfig(account?.id).catch(() => null);
       if (!deviceConfig?.pinEnabled) {
@@ -2550,7 +2597,11 @@ function MainAppContent({ account, onLogout }) {
       if (e?.name !== "NotAllowedError") alert(e?.message || "Face ID / passkey setup could not be completed.");
     }
   };
-  const disableBiometric = async () => {
+  const disableBiometric = async (reauthenticated = false) => {
+    if (!reauthenticated && securityPrefs.biometricEnabled) {
+      await requestSecurityEmail("biometricDisable");
+      return;
+    }
     try {
       if (Capacitor.isNativePlatform()) await setNativeBiometricEnabled(false, account?.id);
       persistSecurity({ biometricEnabled: false, appLock: securityPrefs.pinEnabled ? securityPrefs.appLock : false });
@@ -2558,6 +2609,49 @@ function MainAppContent({ account, onLogout }) {
       alert(error?.message || "Unable to disable biometric unlock.");
     }
   };
+  const completeSecurityReauth = async () => {
+    if (!/^\d{6}$/.test(securityEmailCode) || !securityReauthAction) {
+      alert("Enter the 6-digit code from your email.");
+      return;
+    }
+    setSecurityEmailLoading(true);
+    try {
+      const { error } = await supabase.auth.verifyOtp({ email: account.email, token: securityEmailCode, type: "reauthentication" });
+      if (error) throw error;
+      const action = securityReauthAction;
+      setSecurityReauthAction(null); setSecurityEmailCode("");
+      if (action === "pin") {
+        setPinValue(""); setPinConfirm(""); setPinError(""); setSecuritySheet("pin");
+      } else if (action === "biometric") {
+        await setupPasskey(true);
+      } else if (action === "biometricDisable") {
+        await disableBiometric(true);
+      }
+    } catch (error) {
+      alert(error?.message || "That email verification code could not be verified.");
+    } finally { setSecurityEmailLoading(false); }
+  };
+
+  const sendPhoneVerification = async () => {
+    const normalized = phoneValue.trim().replace(/[^+\d]/g, "");
+    if (!/^\+[1-9]\d{7,14}$/.test(normalized)) {
+      alert("Enter a phone number in international format, for example +233…");
+      return;
+    }
+    const { error } = await supabase.auth.updateUser({ phone: normalized });
+    if (error) { alert(error.message || "Could not send the phone verification code."); return; }
+    setPhonePending(normalized); setPhoneCode("");
+    alert("Verification code sent to your phone.");
+  };
+
+  const verifyPhone = async () => {
+    if (!phonePending || !/^\d{6}$/.test(phoneCode)) { alert("Enter the 6-digit phone code."); return; }
+    const { error } = await supabase.auth.verifyOtp({ phone: phonePending, token: phoneCode, type: "phone_change" });
+    if (error) { alert(error.message || "That phone code could not be verified."); return; }
+    setAccountPhone(phonePending); setPhonePending(""); setPhoneCode("");
+    alert("Recovery phone verified.");
+  };
+
   const toggleAppLock = async () => {
     const enabled = !(securityPrefs.appLock ?? false);
     const deviceConfig = enabled ? await getNativeLockConfig(account?.id).catch(() => null) : null;
@@ -3930,7 +4024,7 @@ function MainAppContent({ account, onLogout }) {
         <LightSection title="Device security">
            <LightRow icon={Lock} title="App Lock" subtitle="Require device authentication before opening RainX" onPress={toggleAppLock} right={<LightToggle on={securityPrefs.appLock ?? false} onChange={toggleAppLock} />} />
           <LightDivider />
-          <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
+          <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{if(securityPrefs.pinEnabled){requestSecurityEmail("pin");return;}setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
           <LightDivider />
            <LightRow icon={Smartphone} title="Face ID / Device Passkey" subtitle={securityPrefs.biometricEnabled?"Biometric unlock is enabled on this device":"Use Face ID, fingerprint or device biometrics"} onPress={securityPrefs.biometricEnabled ? disableBiometric : setupPasskey} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.biometricEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.biometricEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.biometricEnabled?"DISABLE":"SET UP"}</span>} />
         </LightSection>
@@ -3980,6 +4074,12 @@ function MainAppContent({ account, onLogout }) {
         </LightSection>
 
         {securitySheet && <LightSheet onClose={()=>setSecuritySheet(null)}>
+           {securitySheet === "securityReauth" && <>
+             <LightSheetTitle title="Verify your email" desc="RainX sent a one-time code to your account email before this security change." />
+             <input value={securityEmailCode} onChange={event=>setSecurityEmailCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit email code" aria-label="Email verification code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} />
+             <button disabled={securityEmailLoading || securityEmailCode.length !== 6} onClick={completeSecurityReauth} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:(securityEmailLoading || securityEmailCode.length !== 6) ? .55 : 1}}>{securityEmailLoading?"VERIFYING…":"VERIFY & CONTINUE"}</button>
+           </>}
+
           {securitySheet === "twoFactor" && <>
              <LightSheetTitle title="Two-Step Authentication" desc={twoFactorFactor ? "Your authenticator app is verified for this account." : "Use an authenticator app to protect new sign-ins."} />
              {twoFactorFactor ? <>
@@ -3993,7 +4093,7 @@ function MainAppContent({ account, onLogout }) {
              </> : <>
                <div style={{fontSize:12,color:PREF_TEXT,lineHeight:1.55,marginBottom:10}}>Scan this QR code with Google Authenticator, Authy or another TOTP app, then enter the current 6-digit code.</div>
                {twoFactorEnrollment?.totp?.qr_code && <img src={twoFactorEnrollment.totp.qr_code} alt="RainX authenticator QR code" style={{display:"block",width:170,height:170,margin:"6px auto 12px",borderRadius:10,border:`1px solid ${PREF_BORDER}`,background:"#FFFFFF",padding:8}} />}
-               {twoFactorEnrollment?.totp?.secret && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:10,padding:"9px 10px",fontSize:10.5,color:PREF_MUTED,wordBreak:"break-all",marginBottom:12}}>Manual setup key: <strong style={{color:PREF_TEXT}}>{twoFactorEnrollment.totp.secret}</strong></div>}
+                {twoFactorEnrollment?.totp?.secret && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:10,padding:"9px 10px",fontSize:10.5,color:PREF_MUTED,wordBreak:"break-all",marginBottom:12}}>Manual setup key:<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}><strong style={{color:PREF_TEXT,flex:1}}>{twoFactorEnrollment.totp.secret}</strong><button type="button" onClick={()=>copySecurityText(twoFactorEnrollment.totp.secret,"Setup key")} style={{border:`1px solid ${PREF_BORDER}`,background:"#FFFFFF",borderRadius:8,padding:"6px 9px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontWeight:800,fontSize:10.5,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><Copy size={13}/>Copy</button></div></div>}
                <input value={twoFactorCode} onChange={event=>setTwoFactorCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} />
                <button disabled={twoFactorLoading || twoFactorCode.length !== 6} onClick={verifyTwoFactorEnrollment} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:(twoFactorLoading || twoFactorCode.length !== 6) ? .55 : 1}}>{twoFactorLoading?"VERIFYING…":"VERIFY & ENABLE"}</button>
              </>}
@@ -4002,11 +4102,18 @@ function MainAppContent({ account, onLogout }) {
             <LightSheetTitle title="Recovery methods" desc="Keep at least two trusted ways to regain access." />
             <LightRow icon={Mail} title="Account email" subtitle={account?.email || "Not available"} right={<span style={{fontSize:10,fontWeight:800,color:"#1A7A50"}}>VERIFIED</span>} />
             <LightDivider />
-            <LightRow icon={Smartphone} title="Verified phone" subtitle="Add and verify a recovery phone number" onPress={()=>alert("Backend required: phone verification and recovery-factor storage.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
+             <LightRow icon={Smartphone} title="Verified phone" subtitle={accountPhone || "Add and verify a recovery phone number"} onPress={()=>{setPhoneValue(accountPhone);setPhoneCode("");setPhonePending("");setSecuritySheet("phoneRecovery")}} right={<span style={{fontSize:10,fontWeight:800,color:accountPhone?"#1A7A50":PREF_MUTED}}>{accountPhone?"VERIFIED":"SET UP"}</span>} />
             <LightDivider />
              <LightRow icon={Key} title="Recovery codes" subtitle="Generate new one-time codes for account recovery" onPress={generateRecoveryCodes} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
              {recoveryCodes.length > 0 && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"11px 12px",fontFamily:"monospace",fontSize:12,lineHeight:1.8,color:PREF_TEXT}}>Save these codes now. They are shown only once:<br />{recoveryCodes.map(code=><div key={code}>{code}</div>)}</div>}
           </>}
+           {securitySheet === "phoneRecovery" && <>
+             <LightSheetTitle title="Verified phone" desc="Use an international phone number for recovery verification codes." />
+             <input value={phoneValue} onChange={event=>setPhoneValue(event.target.value.replace(/[^+\d\s()-]/g,"").slice(0,20))} inputMode="tel" autoComplete="tel" placeholder="+233 20 000 0000" aria-label="Recovery phone number" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:15,outline:"none",marginBottom:10}} />
+             <button onClick={sendPhoneVerification} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginBottom:12}}>SEND PHONE CODE</button>
+             {phonePending && <><input value={phoneCode} onChange={event=>setPhoneCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit phone code" aria-label="Phone verification code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} /><button onClick={verifyPhone} disabled={phoneCode.length!==6} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:phoneCode.length!==6?.55:1}}>VERIFY PHONE</button></>}
+           </>}
+
           {securitySheet === "loginHistory" && <>
             <LightSheetTitle title="Login history" desc="Recent RainX sign-ins and the devices currently holding sessions." />
             {loginHistoryLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading secure sign-in history…</div> : <>
@@ -4042,7 +4149,7 @@ function MainAppContent({ account, onLogout }) {
             <LightRow icon={FileCheck} title="Moderation & reports" subtitle="Review token reports, takedowns and creator disputes" onPress={()=>alert("Backend required: moderation/report queue.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
           </>}
           {securitySheet === "pin" && <>
-             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed before it is stored on this device."} />
+             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed server-side and is never returned to the app."} />
             <input value={pinValue} onChange={e=>setPinValue(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="New PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />
             <input value={pinConfirm} onChange={e=>setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Confirm PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
             {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
