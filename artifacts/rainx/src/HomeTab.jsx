@@ -379,234 +379,165 @@ function AddMarketSheet({ onClose, onSelect, onReplaceMarket, initialReplacement
   const [managedAsset, setManagedAsset] = useState(null);   // asset being managed or new asset wanting a slot
   const atLimit = activeMarkets.length >= maxActiveMarkets;
   const sheetRef = useRef(null);
-  const nativeSheetOpen = useNativeBottomSheet(sheetRef, true);
-  const sheet = { bind: { ref: sheetRef }, style: nativeSheetOpen ? { visibility: "hidden", pointerEvents: "none" } : {} };
+  const nativeSheetOpen = useNativeBottomSheet(sheetRef, true, onClose);
   useEffect(() => { if (initialReplacementAsset) { setManagedAsset(initialReplacementAsset); setMode("pick_category_for_replace"); } }, [initialReplacementAsset]);
 
-  // ── Manage already-active market: Replace or Delete ─────────────────────
-  if (mode === "manage" && managedAsset) {
+  const handle = <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>;
+  const categoryCards = ASSET_CATALOG.map(cat => (
+    <button key={cat.id} onClick={() => setCategory(cat)} style={{ background:"#FFFFFF", border:"none", borderRadius:14, padding:0, overflow:"hidden", textAlign:"left", cursor:"pointer", minHeight:142, boxShadow:"0 4px 0 #0F0E0B, 0 8px 18px rgba(0,0,0,.18)" }}>
+      <div style={{ height:72, backgroundImage:`linear-gradient(180deg, rgba(15,14,11,.04), rgba(15,14,11,.54)), url(${CATEGORY_ART[cat.id]})`, backgroundSize:"cover", backgroundPosition:"center", display:"flex", alignItems:"flex-end", padding:"0 12px 9px", color:"#FFFFFF", fontSize:23 }}>{cat.emoji}</div>
+      <div style={{ padding:"10px 12px 12px" }}>
+        <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{cat.label}</div>
+        <div style={{ fontSize:11, color:T.muted, marginTop:3 }}>{cat.assets.length} markets</div>
+      </div>
+    </button>
+  ));
+
+  const renderAssetList = (replacementMode = false) => category?.assets.map(asset => {
+    const alreadyActive = activeMarkets.includes(asset.symbol);
+    const isSelf = asset.symbol === managedAsset?.symbol;
+    if (replacementMode && isSelf) return null;
     return (
-      <div style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(0,0,0,0.55)", zIndex:1000, display:"flex", alignItems:"flex-end", overflow:"hidden" }} onClick={onClose}>
-        <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 40px", height:"min(96dvh, 820px)", maxHeight:"96dvh", overflowY:"scroll", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"none", touchAction:"pan-y" }}>
-          <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>
-          <div style={{ padding:"0 20px 20px" }}>
-            <button onClick={() => { setMode(null); setManagedAsset(null); }} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer", display:"flex", alignItems:"center", gap:4, marginBottom:14, padding:0 }}>
-              <ChevronLeft size={16} /><span style={{ fontFamily:FONT_HEAD, fontSize:12, fontWeight:700 }}>Back</span>
-            </button>
-            <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B", marginBottom:3 }}>{managedAsset.symbol}</div>
-            <div style={{ fontSize:12, color:T.muted, marginBottom:22 }}>{managedAsset.name} · Currently active</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-              <button onClick={() => { setMode("pick_category_for_replace"); setCategory(null); }} style={{ background:"#FFFFFF", border:`1px solid ${T.cardBorder}`, borderRadius:12, padding:"16px", textAlign:"left", cursor:"pointer" }}>
-                <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>Replace with another market</div>
-                <div style={{ fontSize:12, color:T.muted, marginTop:3 }}>Swap {managedAsset.symbol} with a different market</div>
-              </button>
-              <button onClick={() => { onRemoveMarket(managedAsset.symbol); onClose(); }} style={{ background:`${T.rust}12`, border:`1px solid ${T.rust}44`, borderRadius:12, padding:"16px", textAlign:"left", cursor:"pointer" }}>
-                <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:T.rust }}>Remove market</div>
-                <div style={{ fontSize:12, color:T.muted, marginTop:3 }}>Stop analyzing {managedAsset.symbol}</div>
-              </button>
-            </div>
-          </div>
+      <button key={asset.symbol} disabled={alreadyActive} onClick={() => {
+        if (replacementMode === "replace-existing") {
+          onRemoveMarket(managedAsset.symbol);
+          onSelect(asset);
+        } else if (replacementMode === "pick-new") {
+          setManagedAsset(asset);
+          setMode("pick_who_to_replace");
+          setCategory(null);
+        } else if (alreadyActive) {
+          setManagedAsset(asset);
+          setMode("manage");
+        } else if (atLimit) {
+          setManagedAsset(asset);
+          setMode("pick_who_to_replace");
+          setCategory(null);
+        } else {
+          onSelect(asset);
+        }
+      }} style={{ background:"#FFFFFF", border:`1px solid ${alreadyActive ? T.gold : T.cardBorder}`, borderRadius:12, padding:"11px 12px", display:"flex", alignItems:"center", gap:10, cursor:alreadyActive ? "default" : "pointer", opacity:alreadyActive && replacementMode ? 0.45 : 1 }}>
+        <img src={resolveMarketLogo({symbol:asset.symbol})?.src} alt="" style={{ width:34, height:34, borderRadius:"50%", flexShrink:0 }} />
+        <div style={{ textAlign:"left", minWidth:0, flex:1 }}>
+          <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:14, color:"#0F0E0B" }}>{asset.symbol}</div>
+          <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{asset.name}</div>
+        </div>
+        <MarketSparkline data={seriesMap[asset.symbol]} base={asset.base} />
+        <div style={{ textAlign:"right", minWidth:74 }}>
+          <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:12, color:"#0F0E0B", fontVariantNumeric:"tabular-nums" }}>{Number(seriesMap[asset.symbol]?.slice(-1)?.[0]?.price ?? asset.base).toFixed(Math.min(asset.digits, 5))}</div>
+          <div style={{ fontSize:10, color:(Number(seriesMap[asset.symbol]?.slice(-1)?.[0]?.price ?? asset.base) >= Number(seriesMap[asset.symbol]?.[0]?.price ?? asset.base)) ? "#21844A" : "#B24B37", marginTop:2 }}>Live move</div>
+        </div>
+        {alreadyActive
+          ? <div style={{ fontSize:10, color:T.gold, fontFamily:FONT_HEAD, fontWeight:700, background:`${T.gold}22`, borderRadius:6, padding:"3px 8px" }}>Active{replacementMode ? "" : " ›"}</div>
+          : replacementMode
+            ? <ChevronRight size={16} color={T.muted} />
+            : atLimit
+              ? <div style={{ fontSize:10, color:T.muted, fontFamily:FONT_HEAD, fontWeight:600, background:`${T.cardBorder}`, borderRadius:6, padding:"3px 8px" }}>Replace</div>
+              : <ChevronRight size={16} color={T.muted} />}
+      </button>
+    );
+  });
+
+  let body;
+  if (mode === "manage" && managedAsset) {
+    body = <>
+      {handle}
+      <div style={{ padding:"0 20px 20px" }}>
+        <button onClick={() => { setMode(null); setManagedAsset(null); }} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer", display:"flex", alignItems:"center", gap:4, marginBottom:14, padding:0 }}>
+          <ChevronLeft size={16} /><span style={{ fontFamily:FONT_HEAD, fontSize:12, fontWeight:700 }}>Back</span>
+        </button>
+        <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B", marginBottom:3 }}>{managedAsset.symbol}</div>
+        <div style={{ fontSize:12, color:T.muted, marginBottom:22 }}>{managedAsset.name} · Currently active</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <button onClick={() => { setMode("pick_category_for_replace"); setCategory(null); }} style={{ background:"#FFFFFF", border:`1px solid ${T.cardBorder}`, borderRadius:12, padding:"16px", textAlign:"left", cursor:"pointer" }}>
+            <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>Replace with another market</div>
+            <div style={{ fontSize:12, color:T.muted, marginTop:3 }}>Swap {managedAsset.symbol} with a different market</div>
+          </button>
+          <button onClick={() => { onRemoveMarket(managedAsset.symbol); onClose(); }} style={{ background:`${T.rust}12`, border:`1px solid ${T.rust}44`, borderRadius:12, padding:"16px", textAlign:"left", cursor:"pointer" }}>
+            <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:T.rust }}>Remove market</div>
+            <div style={{ fontSize:12, color:T.muted, marginTop:3 }}>Stop analyzing {managedAsset.symbol}</div>
+          </button>
         </div>
       </div>
-    );
-  }
-
-  // ── Pick new replacement market (category → asset) ───────────────────────
-  if (mode === "pick_category_for_replace" || mode === "pick_new_when_full") {
+    </>;
+  } else if (mode === "pick_category_for_replace" || mode === "pick_new_when_full") {
     const backMode = mode;
-    if (!category) {
-      return (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:80, display:"flex", alignItems:"flex-end" }} onClick={onClose}>
-          <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
-            <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>
-            <div style={{ padding:"0 20px 16px", display:"flex", alignItems:"center", gap:10 }}>
-              <button onClick={() => { setMode(backMode === "pick_category_for_replace" ? "manage" : null); }} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><ChevronLeft size={20} /></button>
-              <div>
-                <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>
-                  {backMode === "pick_category_for_replace" ? `Replace ${managedAsset?.symbol}` : "Select replacement market"}
-                </div>
-                <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>Choose a category</div>
-              </div>
-            </div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, padding:"0 16px" }}>
-              {ASSET_CATALOG.map(cat => (
-                <button key={cat.id} onClick={() => setCategory(cat)} style={{ background:"#FFFFFF", border:"none", borderRadius:14, padding:0, overflow:"hidden", textAlign:"left", cursor:"pointer", minHeight:142, boxShadow:"0 4px 0 #0F0E0B, 0 8px 18px rgba(0,0,0,.18)" }}>
-                  <div style={{ height:72, backgroundImage:`linear-gradient(180deg, rgba(15,14,11,.04), rgba(15,14,11,.54)), url(${CATEGORY_ART[cat.id]})`, backgroundSize:"cover", backgroundPosition:"center", display:"flex", alignItems:"flex-end", padding:"0 12px 9px", color:"#FFFFFF", fontSize:23 }}>{cat.emoji}</div>
-                  <div style={{ padding:"10px 12px 12px" }}>
-                    <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{cat.label}</div>
-                    <div style={{ fontSize:11, color:T.muted, marginTop:3 }}>{cat.assets.length} markets</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
+    body = <>
+      {handle}
+      <div style={{ padding:"0 20px 16px", display:"flex", alignItems:"center", gap:10 }}>
+        <button onClick={() => { setMode(backMode === "pick_category_for_replace" ? "manage" : null); }} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><ChevronLeft size={20} /></button>
+        <div>
+          <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>{backMode === "pick_category_for_replace" ? `Replace ${managedAsset?.symbol}` : "Select replacement market"}</div>
+          <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{category ? (backMode === "pick_category_for_replace" ? `Replacing ${managedAsset?.symbol}` : "Pick market to add") : "Choose a category"}</div>
         </div>
-      );
-    }
-    return (
-      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:80, display:"flex", alignItems:"flex-end" }} onClick={onClose}>
-          <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
-          <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>
+      </div>
+      {!category ? (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, padding:"0 16px" }}>{categoryCards}</div>
+      ) : (
+        <div style={{ padding:"0 16px", display:"flex", flexDirection:"column", gap:8 }}>{renderAssetList(backMode === "pick_category_for_replace" ? "replace-existing" : "pick-new")}</div>
+      )}
+    </>;
+  } else if (mode === "pick_who_to_replace" && managedAsset) {
+    body = <>
+      {handle}
+      <div style={{ padding:"0 20px 20px" }}>
+        <button onClick={() => setMode("pick_new_when_full")} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer", display:"flex", alignItems:"center", gap:4, marginBottom:14, padding:0 }}>
+          <ChevronLeft size={16} /><span style={{ fontFamily:FONT_HEAD, fontSize:12, fontWeight:700 }}>Back</span>
+        </button>
+        <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B", marginBottom:3 }}>Replace a Market</div>
+        <div style={{ fontSize:12, color:T.muted, marginBottom:18 }}>Choose which market to replace with <strong style={{ color:"#0F0E0B" }}>{managedAsset.symbol}</strong></div>
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {activeMarkets.map(sym => {
+            const a = ALL_ASSETS.find(x => x.symbol === sym);
+            if (!a) return null;
+            return (
+              <button key={sym} onClick={() => onReplaceMarket?.(sym, managedAsset.symbol)} style={{ background:"#FFFFFF", border:`1px solid ${T.cardBorder}`, borderRadius:12, padding:"11px 12px", display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
+                <img src={resolveMarketLogo({symbol:a.symbol})?.src} alt="" style={{ width:34, height:34, borderRadius:"50%" }} />
+                <div style={{ textAlign:"left" }}>
+                  <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{a.symbol}</div>
+                  <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{a.name}</div>
+                </div>
+                <div style={{ fontSize:10, color:T.rust, fontFamily:FONT_HEAD, fontWeight:700, background:`${T.rust}22`, borderRadius:6, padding:"3px 8px" }}>Replace</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </>;
+  } else {
+    body = <>
+      {handle}
+      {!category ? (
+        <>
+          <div style={{ padding:"0 20px 16px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div>
+              <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>Add Market</div>
+              <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>Choose a market · {activeMarkets.length}/{maxActiveMarkets} active</div>
+            </div>
+            <button data-rainx-native-close onClick={onClose} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><X size={20} /></button>
+          </div>
+          {atLimit && <div style={{ margin:"0 16px 14px", background:`${T.gold}11`, border:`1px solid ${T.gold}44`, borderRadius:10, padding:"10px 14px", fontSize:12, color:T.gold, fontFamily:FONT_HEAD, fontWeight:600 }}>3 markets active. Tap an active market below to replace or remove it.</div>}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, padding:"0 16px" }}>{categoryCards}</div>
+        </>
+      ) : (
+        <>
           <div style={{ padding:"0 20px 16px", display:"flex", alignItems:"center", gap:12 }}>
             <button onClick={() => setCategory(null)} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><ChevronLeft size={20} /></button>
             <div>
               <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>{category.label}</div>
-              <div style={{ fontSize:12, color:T.muted }}>
-                {backMode === "pick_category_for_replace" ? `Replacing ${managedAsset?.symbol}` : "Pick market to add"}
-              </div>
+              <div style={{ fontSize:12, color:T.muted }}>Select a market</div>
             </div>
           </div>
-          <div style={{ padding:"0 16px", display:"flex", flexDirection:"column", gap:8 }}>
-            {category.assets.map(asset => {
-              const alreadyActive = activeMarkets.includes(asset.symbol);
-              const isSelf = asset.symbol === managedAsset?.symbol;
-              if (isSelf) return null;
-              return (
-                <button key={asset.symbol} disabled={alreadyActive} onClick={() => {
-                  if (backMode === "pick_category_for_replace") {
-                    onRemoveMarket(managedAsset.symbol);
-                    onSelect(asset);
-                  } else {
-                    // pick_new_when_full: need to pick which to remove
-                    setManagedAsset(asset); // new asset wanting a slot
-                    setMode("pick_who_to_replace");
-                    setCategory(null);
-                  }
-                }} style={{ background:"#FFFFFF", border:`1px solid ${alreadyActive ? T.gold : T.cardBorder}`, borderRadius:12, padding:"11px 12px", display:"flex", alignItems:"center", gap:10, cursor:alreadyActive ? "default" : "pointer", opacity:alreadyActive ? 0.45 : 1 }}>
-                   <img src={resolveMarketLogo({symbol:asset.symbol})?.src} alt="" style={{ width:34, height:34, borderRadius:"50%", flexShrink:0 }} />
-                   <div style={{ textAlign:"left", minWidth:0, flex:1 }}>
-                     <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:14, color:"#0F0E0B" }}>{asset.symbol}</div>
-                     <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{asset.name}</div>
-                   </div>
-                   <MarketSparkline data={seriesMap[asset.symbol]} base={asset.base} />
-                   <div style={{ textAlign:"right", minWidth:74 }}>
-                     <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:12, color:"#0F0E0B", fontVariantNumeric:"tabular-nums" }}>{Number(seriesMap[asset.symbol]?.slice(-1)?.[0]?.price ?? asset.base).toFixed(Math.min(asset.digits, 5))}</div>
-                     <div style={{ fontSize:10, color:(Number(seriesMap[asset.symbol]?.slice(-1)?.[0]?.price ?? asset.base) >= Number(seriesMap[asset.symbol]?.[0]?.price ?? asset.base)) ? "#21844A" : "#B24B37", marginTop:2 }}>Live move</div>
-                   </div>
-                  {alreadyActive
-                    ? <div style={{ fontSize:10, color:T.gold, fontFamily:FONT_HEAD, fontWeight:700, background:`${T.gold}22`, borderRadius:6, padding:"3px 8px" }}>Active</div>
-                    : <ChevronRight size={16} color={T.muted} />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
+          <div style={{ padding:"0 16px", display:"flex", flexDirection:"column", gap:8 }}>{renderAssetList()}</div>
+        </>
+      )}
+    </>;
   }
 
-  // ── Pick which active market to evict (when 3 are full and user wants a 4th) ─
-  if (mode === "pick_who_to_replace" && managedAsset) {
-    return (
-      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:80, display:"flex", alignItems:"flex-end" }} onClick={onClose}>
-          <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 40px", height:"min(96dvh, 820px)", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
-          <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>
-          <div style={{ padding:"0 20px 20px" }}>
-            <button onClick={() => setMode("pick_new_when_full")} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer", display:"flex", alignItems:"center", gap:4, marginBottom:14, padding:0 }}>
-              <ChevronLeft size={16} /><span style={{ fontFamily:FONT_HEAD, fontSize:12, fontWeight:700 }}>Back</span>
-            </button>
-            <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B", marginBottom:3 }}>Replace a Market</div>
-            <div style={{ fontSize:12, color:T.muted, marginBottom:18 }}>Choose which market to replace with <strong style={{ color:"#0F0E0B" }}>{managedAsset.symbol}</strong></div>
-            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-              {activeMarkets.map(sym => {
-                const a = ALL_ASSETS.find(x => x.symbol === sym);
-                if (!a) return null;
-                return (
-                   <button key={sym} onClick={() => { onReplaceMarket?.(sym, managedAsset.symbol); }} style={{ background:"#FFFFFF", border:`1px solid ${T.cardBorder}`, borderRadius:12, padding:"11px 12px", display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
-                     <img src={resolveMarketLogo({symbol:a.symbol})?.src} alt="" style={{ width:34, height:34, borderRadius:"50%" }} />
-                    <div style={{ textAlign:"left" }}>
-                      <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{a.symbol}</div>
-                      <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{a.name}</div>
-                    </div>
-                    <div style={{ fontSize:10, color:T.rust, fontFamily:FONT_HEAD, fontWeight:700, background:`${T.rust}22`, borderRadius:6, padding:"3px 8px" }}>Replace</div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Default: category grid + asset list ─────────────────────────────────
   return (
-    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:80, display:"flex", alignItems:"flex-end" }} onClick={onClose}>
-           <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
-        <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}>
-          <div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} />
-        </div>
-        {!category ? (
-          <>
-            <div style={{ padding:"0 20px 16px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div>
-                <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>Add Market</div>
-                <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>Choose a market · {activeMarkets.length}/{maxActiveMarkets} active</div>
-              </div>
-              <button onClick={onClose} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><X size={20} /></button>
-            </div>
-            {atLimit && (
-              <div style={{ margin:"0 16px 14px", background:`${T.gold}11`, border:`1px solid ${T.gold}44`, borderRadius:10, padding:"10px 14px", fontSize:12, color:T.gold, fontFamily:FONT_HEAD, fontWeight:600 }}>
-                3 markets active. Tap an active market below to replace or remove it.
-              </div>
-            )}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, padding:"0 16px" }}>
-              {ASSET_CATALOG.map(cat => (
-                   <button key={cat.id} onClick={() => setCategory(cat)} style={{ background:"#FFFFFF", border:"none", borderRadius:14, padding:0, overflow:"hidden", textAlign:"left", cursor:"pointer", minHeight:142, boxShadow:"0 4px 0 #0F0E0B, 0 8px 18px rgba(0,0,0,.18)" }}>
-                   <div style={{ height:72, backgroundImage:`linear-gradient(180deg, rgba(15,14,11,.04), rgba(15,14,11,.54)), url(${CATEGORY_ART[cat.id]})`, backgroundSize:"cover", backgroundPosition:"center", display:"flex", alignItems:"flex-end", padding:"0 12px 9px", color:"#FFFFFF", fontSize:23 }}>{cat.emoji}</div>
-                   <div style={{ padding:"10px 12px 12px" }}>
-                     <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{cat.label}</div>
-                     <div style={{ fontSize:11, color:T.muted, marginTop:3 }}>{cat.assets.length} markets</div>
-                   </div>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={{ padding:"0 20px 16px", display:"flex", alignItems:"center", gap:12 }}>
-              <button onClick={() => setCategory(null)} style={{ background:"none", border:"none", color:T.muted, cursor:"pointer" }}><ChevronLeft size={20} /></button>
-              <div>
-                <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:"#0F0E0B" }}>{category.label}</div>
-                <div style={{ fontSize:12, color:T.muted }}>Select a market</div>
-              </div>
-            </div>
-            <div style={{ padding:"0 16px", display:"flex", flexDirection:"column", gap:8 }}>
-              {category.assets.map(asset => {
-                const alreadyActive = activeMarkets.includes(asset.symbol);
-                return (
-                   <button key={asset.symbol} onClick={() => {
-                    if (alreadyActive) {
-                      setManagedAsset(asset);
-                      setMode("manage");
-                    } else if (atLimit) {
-                      setManagedAsset(asset);
-                      setMode("pick_who_to_replace");
-                    } else {
-                      onSelect(asset);
-                    }
-                   }} style={{ background:"#FFFFFF", border:`1px solid ${alreadyActive ? T.gold : T.cardBorder}`, borderRadius:12, padding:"11px 12px", display:"flex", alignItems:"center", gap:10, cursor:"pointer" }}>
-                     <img src={resolveMarketLogo({symbol:asset.symbol})?.src} alt="" style={{ width:34, height:34, borderRadius:"50%", flexShrink:0 }} />
-                     <div style={{ textAlign:"left", minWidth:0, flex:1 }}>
-                      <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:"#0F0E0B" }}>{asset.symbol}</div>
-                      <div style={{ fontSize:12, color:T.muted, marginTop:2 }}>{asset.name}</div>
-                    </div>
-                     <MarketSparkline data={seriesMap[asset.symbol]} base={asset.base} />
-                     <div style={{ textAlign:"right", minWidth:74 }}>
-                       <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:12, color:"#0F0E0B", fontVariantNumeric:"tabular-nums" }}>{Number(seriesMap[asset.symbol]?.slice(-1)?.[0]?.price ?? asset.base).toFixed(Math.min(asset.digits, 5))}</div>
-                       <div style={{ fontSize:10, color:"#21844A", marginTop:2 }}>Live move</div>
-                     </div>
-                    {alreadyActive
-                      ? <div style={{ fontSize:10, color:T.gold, fontFamily:FONT_HEAD, fontWeight:700, background:`${T.gold}22`, borderRadius:6, padding:"3px 8px" }}>Active ›</div>
-                      : (atLimit
-                        ? <div style={{ fontSize:10, color:T.muted, fontFamily:FONT_HEAD, fontWeight:600, background:`${T.cardBorder}`, borderRadius:6, padding:"3px 8px" }}>Replace</div>
-                        : <ChevronRight size={16} color={T.muted} />)}
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(0,0,0,0.55)", zIndex:900, display:"flex", alignItems:"flex-end", overflow:"hidden", pointerEvents:nativeSheetOpen ? "none" : "auto" }}>
+      <div ref={sheetRef} onClick={e => e.stopPropagation()} style={{ background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", maxHeight:"96dvh", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
+        {body}
       </div>
     </div>
   );
