@@ -69,6 +69,9 @@ function serializeSheet(root: HTMLElement) {
   clone.style.left = 'auto';
   clone.style.transform = 'none';
   clone.style.animation = 'none';
+  clone.style.boxSizing = 'border-box';
+  clone.style.width = '100%';
+  clone.style.margin = '0';
   clone.className = clone.className
     .split(/\s+/)
     .filter((token) => !/^(fixed|inset-|top-|right-|bottom-|left-|translate-|animate-|slide-)/.test(token))
