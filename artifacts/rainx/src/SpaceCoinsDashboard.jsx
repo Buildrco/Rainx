@@ -384,6 +384,40 @@ function useEdgeBack(onBack) {
   };
 }
 
+function normalizeCoinLogo(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) return resolve(null);
+    const sourceUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const max = 1024;
+        const scale = Math.min(1, max / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+        const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+        const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx) throw new Error("Image processing is unavailable on this device.");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(image, 0, 0, width, height);
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(sourceUrl);
+          if (!blob) return reject(new Error("Unable to prepare the image for upload."));
+          const safeName = (file.name || "coin-logo").replace(/[^a-z0-9._-]/gi, "_").replace(/\.[^.]+$/, "") + ".jpg";
+          resolve(new File([blob], safeName, { type: "image/jpeg", lastModified: Date.now() }));
+        }, "image/jpeg", 0.9);
+      } catch (error) {
+        URL.revokeObjectURL(sourceUrl);
+        reject(error);
+      }
+    };
+    image.onerror = () => { URL.revokeObjectURL(sourceUrl); reject(new Error("This image could not be read. Choose a PNG or JPG image.")); };
+    image.src = sourceUrl;
+  });
+}
+
 function CreateCoin({ onBack, onCreated }) {
   const [step, setStep] = useState(1);
   const [saving, setSaving] = useState(false);
@@ -428,18 +462,27 @@ function CreateCoin({ onBack, onCreated }) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.id) throw new Error("Sign in to launch a coin.");
       let image_url = null;
+      let uploadedLogoPath = null;
       if (logo) {
-        const ext = (logo.name.split(".").pop() || "jpg").toLowerCase();
+        const preparedLogo = await normalizeCoinLogo(logo);
         const fileId = globalThis.crypto?.randomUUID?.() || Date.now() + "-" + Math.random().toString(36).slice(2);
-        const objectPath = user.id + "/" + fileId + "." + ext;
-        const upload = await supabase.storage.from("space-coin-logos").upload(objectPath, logo, { contentType: logo.type || "image/jpeg", upsert: false });
+        uploadedLogoPath = user.id + "/" + fileId + ".jpg";
+        const upload = await supabase.storage.from("space-coin-logos").upload(uploadedLogoPath, preparedLogo, { contentType: "image/jpeg", cacheControl: "3600", upsert: false });
         if (upload.error) throw upload.error;
-        image_url = supabase.storage.from("space-coin-logos").getPublicUrl(objectPath).data.publicUrl;
+        image_url = supabase.storage.from("space-coin-logos").getPublicUrl(uploadedLogoPath).data.publicUrl;
       }
       const supply = Number(String(form.supply).replace(/,/g, ""));
       const { data, error: insertError } = await supabase.from("space_coins").insert({ creator_id: user.id, name: form.name.trim(), symbol: form.symbol.trim().toUpperCase(), description: form.description.trim(), network: form.network, total_supply: supply > 0 ? supply : 1000000000, initial_price: 0.000001, current_price: 0.000001, image_url, status: "live" }).select("*").single();
-      if (insertError) throw insertError;
-      await supabase.from("space_coin_ticks").insert({ coin_id: data.id, price: data.current_price, open: data.current_price, high: data.current_price, low: data.current_price, close: data.current_price });
+      if (insertError) {
+        if (uploadedLogoPath) await supabase.storage.from("space-coin-logos").remove([uploadedLogoPath]);
+        throw insertError;
+      }
+      const { error: tickError } = await supabase.from("space_coin_ticks").insert({ coin_id: data.id, price: data.current_price, open: data.current_price, high: data.current_price, low: data.current_price, close: data.current_price });
+      if (tickError) {
+        await supabase.from("space_coins").delete().eq("id", data.id);
+        if (uploadedLogoPath) await supabase.storage.from("space-coin-logos").remove([uploadedLogoPath]);
+        throw tickError;
+      }
       onCreated?.(data);
       setStep(5);
     } catch (err) {
@@ -540,7 +583,7 @@ function CreateCoin({ onBack, onCreated }) {
                   ref={logoInputRef}
                   onClick={(event) => event.stopPropagation()}
                   type="file"
-                  accept="image/*"
+                  accept="image/png,image/jpeg,image/webp"
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     if (file && file.size > 5 * 1024 * 1024) {
@@ -938,10 +981,11 @@ function Metric({ label, value }) { return <div className="rx-creator-metric"><s
 
 function NativeTabs({ active }) { return <nav className="rx-native-tabs">{["Home", "Space Coins", "Wallet", "Profile"].map((name) => <span className={active === name ? "active" : ""} key={name}><span className="rx-tab-dot" />{name}</span>)}</nav>; }
 
-function CoinPriceChart({ coin, range, chartType, tradeMarkers, onPriceChange }) {
+function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordinate }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
+  const liveBarRef = useRef(null);
 
   const RANGE_MS = useMemo(() => ({
     "24h": 24 * 60 * 60 * 1000,
@@ -950,57 +994,54 @@ function CoinPriceChart({ coin, range, chartType, tradeMarkers, onPriceChange })
     "3m": 90 * 24 * 60 * 60 * 1000,
   }), []);
 
-  const load = useCallback(async () => {
-    if (!coin?.id || !seriesRef.current) return;
-    const since = new Date(Date.now() - RANGE_MS[range]).toISOString();
-    const [{ data: ticks }, { data: trades }] = await Promise.all([
-      supabase.from("space_coin_ticks").select("price,open,high,low,close,created_at").eq("coin_id", coin.id).gte("created_at", since).order("created_at", { ascending: true }).limit(1500),
-      supabase.from("space_coin_trades").select("side,price,created_at").eq("coin_id", coin.id).gte("created_at", since).order("created_at", { ascending: true }).limit(500),
-    ]);
+  const BUCKET_SECONDS = useMemo(() => ({ "24h": 60, "7d": 5 * 60, "1m": 30 * 60, "3m": 60 * 60 }), []);
+  const bucketSeconds = BUCKET_SECONDS[range] || 60;
 
-    const fallback = Number(coin.current_price || coin.initial_price || 0.000001);
-    const rows = (ticks || []).map((row) => {
-      const time = Math.floor(new Date(row.created_at).getTime() / 1000);
+  const aggregate = useCallback((ticks, fallback) => {
+    const map = new Map();
+    (ticks || []).forEach((row) => {
+      const rawTime = Math.floor(new Date(row.created_at || Date.now()).getTime() / 1000);
       const close = Number(row.close ?? row.price);
+      if (!rawTime || !Number.isFinite(close) || close <= 0) return;
       const open = Number(row.open ?? close);
       const high = Number(row.high ?? Math.max(open, close));
       const low = Number(row.low ?? Math.min(open, close));
-      return { time, open, high, low, close };
-    }).filter((row) => row.time > 0 && [row.open, row.high, row.low, row.close].every(Number.isFinite) && row.close > 0);
+      const time = Math.floor(rawTime / bucketSeconds) * bucketSeconds;
+      const previous = map.get(time);
+      if (!previous) map.set(time, { time, open, high, low, close });
+      else map.set(time, { time, open: previous.open, high: Math.max(previous.high, high), low: Math.min(previous.low, low), close });
+    });
+    const bars = [...map.values()].sort((a, b) => a.time - b.time);
+    if (bars.length) return bars;
+    const t = Math.floor(new Date(coin?.created_at || Date.now()).getTime() / 1000);
+    const time = Math.floor(t / bucketSeconds) * bucketSeconds;
+    return [{ time, open: fallback, high: fallback, low: fallback, close: fallback }];
+  }, [bucketSeconds, coin?.created_at]);
 
-    const tradePoints = (trades || []).map((row) => ({
-      time: Math.floor(new Date(row.created_at).getTime() / 1000),
-      value: Number(row.price),
-    })).filter((row) => row.time > 0 && Number.isFinite(row.value) && row.value > 0);
+  const publish = useCallback((price, data) => {
+    onPriceChange?.(price, data);
+    const coordinate = seriesRef.current?.priceToCoordinate?.(price);
+    onPriceCoordinate?.(coordinate);
+  }, [onPriceChange, onPriceCoordinate]);
 
-    let bars = rows;
-    if (!bars.length && tradePoints.length) {
-      bars = tradePoints.map((p) => ({ time: p.time, open: p.value, high: p.value, low: p.value, close: p.value }));
-    }
-    if (!bars.length) {
-      const t = Math.floor(new Date(coin.created_at || Date.now()).getTime() / 1000);
-      bars = [{ time: t, open: fallback, high: fallback, low: fallback, close: fallback }];
-    }
-
-    // Lightweight Charts requires strictly increasing timestamps. Keep the latest
-    // tick for duplicate timestamps rather than drawing fake extra bars.
-    const deduped = [];
-    const byTime = new Map();
-    bars.forEach((bar) => byTime.set(bar.time, bar));
-    [...byTime.keys()].sort((a, b) => a - b).forEach((time) => deduped.push(byTime.get(time)));
-
+  const load = useCallback(async () => {
+    if (!coin?.id || !seriesRef.current) return;
+    const since = new Date(Date.now() - RANGE_MS[range]).toISOString();
+    const { data: ticks, error } = await supabase.from("space_coin_ticks")
+      .select("price,open,high,low,close,created_at")
+      .eq("coin_id", coin.id).gte("created_at", since)
+      .order("created_at", { ascending: true }).limit(5000);
+    if (error) console.warn("[SpaceCoins] tick load failed", error);
+    const fallback = Number(coin.current_price || coin.initial_price || 0.000001);
+    const bars = aggregate(ticks, fallback);
+    liveBarRef.current = bars[bars.length - 1] || null;
     try {
-      if (chartType === "line") {
-        seriesRef.current.setData(deduped.map((b) => ({ time: b.time, value: b.close })));
-      } else {
-        seriesRef.current.setData(deduped);
-      }
+      if (chartType === "line") seriesRef.current.setData(bars.map((b) => ({ time: b.time, value: b.close })));
+      else seriesRef.current.setData(bars);
       chartRef.current?.timeScale().fitContent();
-      onPriceChange?.(deduped[deduped.length - 1]?.close || fallback, deduped.map((b) => ({ time: b.time, value: b.close })));
-    } catch (error) {
-      console.warn("[SpaceCoins] chart update failed", error);
-    }
-  }, [coin, range, chartType, RANGE_MS, onPriceChange]);
+      publish(bars[bars.length - 1]?.close || fallback, bars.map((b) => ({ time: b.time, value: b.close })));
+    } catch (error) { console.warn("[SpaceCoins] chart update failed", error); }
+  }, [coin, range, chartType, RANGE_MS, aggregate, publish]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -1008,64 +1049,21 @@ function CoinPriceChart({ coin, range, chartType, tradeMarkers, onPriceChange })
     const chart = createChart(el, {
       attributionLogo: false,
       width: el.clientWidth || 340,
-      height: el.clientHeight || 280,
-      layout: {
-        background: { color: "#FFFFFF" },
-        textColor: "#8B8F94",
-        fontFamily: "-apple-system,BlinkMacSystemFont,\"SF Pro Display\",\"SF Pro Text\",Arial,sans-serif",
-        fontSize: 10,
-      },
-      grid: {
-        vertLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed },
-        horzLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" },
-        horzLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" },
-      },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.12 } },
+      height: el.clientHeight || 255,
+      layout: { background: { color: "#FFFFFF" }, textColor: "#8B8F94", fontFamily: "-apple-system,BlinkMacSystemFont,\"SF Pro Display\",\"SF Pro Text\",Arial,sans-serif", fontSize: 10 },
+      grid: { vertLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed }, horzLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed } },
+      crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" }, horzLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" } },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
       leftPriceScale: { visible: false },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 9, minBarSpacing: 3 },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2 },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: false } },
+      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: true } },
     });
-
-    const series = chartType === "line"
-      ? chart.addAreaSeries({
-          lineColor: "#5D80D7",
-          topColor: "rgba(117,147,223,.34)",
-          bottomColor: "rgba(117,147,223,.06)",
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: true,
-          crosshairMarkerVisible: true,
-          crosshairMarkerRadius: 4,
-        })
-      : chart.addCandlestickSeries({
-          upColor: "#2787D9",
-          downColor: "#E64B4B",
-          borderUpColor: "#2787D9",
-          borderDownColor: "#E64B4B",
-          wickUpColor: "#2787D9",
-          wickDownColor: "#E64B4B",
-          priceLineVisible: false,
-        });
-
-    chartRef.current = chart;
-    seriesRef.current = series;
-    const ro = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect?.width || el.clientWidth || 340;
-      const height = entries[0]?.contentRect?.height || 280;
-      chart.resize(width, height);
-    });
+    const series = chartType === "line" ? chart.addAreaSeries({ lineColor: "#5D80D7", topColor: "rgba(117,147,223,.34)", bottomColor: "rgba(117,147,223,.06)", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 4 }) : chart.addCandlestickSeries({ upColor: "#2787D9", downColor: "#E64B4B", borderUpColor: "#2787D9", borderDownColor: "#E64B4B", wickUpColor: "#2787D9", wickDownColor: "#E64B4B", priceLineVisible: false, lastValueVisible: true });
+    chartRef.current = chart; seriesRef.current = series;
+    const ro = new ResizeObserver((entries) => { const r = entries[0]?.contentRect; chart.resize(r?.width || el.clientWidth || 340, r?.height || el.clientHeight || 255); });
     ro.observe(el);
-    return () => {
-      ro.disconnect();
-      chart.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-    };
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = null; };
   }, [chartType]);
 
   useEffect(() => { load(); }, [load]);
@@ -1076,25 +1074,26 @@ function CoinPriceChart({ coin, range, chartType, tradeMarkers, onPriceChange })
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "space_coin_ticks", filter: "coin_id=eq." + coin.id }, (payload) => {
         const row = payload.new || {};
         const close = Number(row.close ?? row.price);
-        const time = Math.floor(new Date(row.created_at || Date.now()).getTime() / 1000);
-        if (!Number.isFinite(close) || close <= 0 || !time || !seriesRef.current) return;
+        const rawTime = Math.floor(new Date(row.created_at || Date.now()).getTime() / 1000);
+        if (!Number.isFinite(close) || close <= 0 || !rawTime || !seriesRef.current) return;
         const since = Math.floor((Date.now() - RANGE_MS[range]) / 1000);
-        if (time < since) return;
+        if (rawTime < since) return;
+        const time = Math.floor(rawTime / bucketSeconds) * bucketSeconds;
         try {
-          if (chartType === "line") {
-            seriesRef.current.update({ time, value: close });
-          } else {
-            const open = Number(row.open ?? close);
-            const high = Number(row.high ?? Math.max(open, close));
-            const low = Number(row.low ?? Math.min(open, close));
-            seriesRef.current.update({ time, open, high, low, close });
+          if (chartType === "line") seriesRef.current.update({ time, value: close });
+          else {
+            const previous = liveBarRef.current;
+            const next = previous && previous.time === time
+              ? { time, open: previous.open, high: Math.max(previous.high, close), low: Math.min(previous.low, close), close }
+              : { time, open: close, high: close, low: close, close };
+            liveBarRef.current = next;
+            seriesRef.current.update(next);
           }
-          onPriceChange?.(close);
-        } catch {}
-      })
-      .subscribe();
+          publish(close);
+        } catch (error) { console.warn("[SpaceCoins] live chart update failed", error); }
+      }).subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [coin?.id, range, chartType, RANGE_MS, onPriceChange]);
+  }, [coin?.id, range, chartType, RANGE_MS, bucketSeconds, publish]);
 
   return <div ref={containerRef} className="rx-real-chart" aria-label={`${chartType === "line" ? "Live line" : "Live candlestick"} Space Coin price chart`} />;
 }
@@ -1174,34 +1173,43 @@ function OrderSheet({ market, orders, pending, closed, livePrice, onClose, onSel
 }
 
 function OrderDetailSheet({ market, order, livePrice, onClose, onModify, onCloseOrder }) {
+  const [view, setView] = useState("actions");
   const [stopLoss, setStopLoss] = useState(order.stop_loss ? String(order.stop_loss) : "");
   const [takeProfit, setTakeProfit] = useState(order.take_profit ? String(order.take_profit) : "");
   const [slOn, setSlOn] = useState(Boolean(order.stop_loss));
   const [tpOn, setTpOn] = useState(Boolean(order.take_profit));
   const [confirm, setConfirm] = useState(false);
-  const sheet = useSheetDrag(true, onClose, 0.55);
+  const sheet = useSheetDrag(true, onClose, 0.58);
   const isClosed = order.status === "closed";
   const price = Number(livePrice || order.close_price || order.price);
   const pnl = order.side === "buy" ? (price - Number(order.price)) * Number(order.quantity) : (Number(order.price) - price) * Number(order.quantity);
+  const sideClass = order.side === "buy" ? "buy" : "sell";
   return <div className="rx-order-backdrop" onClick={onClose}>
     <section className="rx-order-detail-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
       <div className="rx-sheet-drag-handle" />
       <div className="rx-order-detail-head"><strong>#{String(order.id).slice(0, 10)}</strong><button onClick={onClose}><X size={21} /></button></div>
-      <div className="rx-order-detail-summary">
-        <div><strong>{market?.name || "Space Coin"}</strong><small>{order.side === "buy" ? "Buy" : "Sell"} {Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</small></div>
-        <b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : ""}{formatMoney(pnl)}</b>
-      </div>
-      <div className="rx-order-detail-tabs"><button className="active">Modify</button><button>Partial close</button><button>Close by</button></div>
-      <div className="rx-order-detail-grid"><div><small>Entry price</small><strong>{order.price}</strong></div><div><small>Current price</small><strong>{price}</strong></div><div><small>Time</small><strong>{new Date(order.created_at).toLocaleString()}</strong></div><div><small>Mode</small><strong>Demo</strong></div></div>
-      {!isClosed && <><div className="rx-order-setting"><span>Stop Loss</span><button className={`rx-switch ${slOn ? "on" : ""}`} onClick={() => setSlOn(!slOn)}><i /></button></div>
-      {slOn && <input className="rx-order-input" inputMode="decimal" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} placeholder="Stop loss price" />}
-      <div className="rx-order-setting"><span>Take Profit</span><button className={`rx-switch ${tpOn ? "on" : ""}`} onClick={() => setTpOn(!tpOn)}><i /></button></div>
-      {tpOn && <input className="rx-order-input" inputMode="decimal" value={takeProfit} onChange={(e) => setTakeProfit(e.target.value)} placeholder="Take profit price" />}
-      <button className="rx-order-save" onClick={() => onModify(order.id, slOn ? Number(stopLoss) || null : null, tpOn ? Number(takeProfit) || null : null)}>Save changes</button>
-      <button className="rx-order-close" onClick={() => setConfirm(true)}>Close order</button></>}
-      {confirm && <div className="rx-close-confirm"><h3>Close position #{String(order.id).slice(0, 10)}?</h3><div><span>Lot size</span><b>{Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</b></div><div><span>Closing price</span><b>{price}</b></div><div><span>Profit</span><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : ""}{formatMoney(pnl)}</b></div><button onClick={() => onCloseOrder(order)}>Confirm</button><button onClick={() => setConfirm(false)}>Cancel</button></div>}
+      <div className="rx-order-detail-summary"><div><strong>{market?.name || "Space Coin"}</strong><small>{order.side === "buy" ? "Buy" : "Sell"} · {Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lots</small></div><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div>
+      {!isClosed && view === "actions" && <div className="rx-order-action-menu"><button className={`rx-order-action ${sideClass}`} onClick={() => setView("modify")}><strong>Edit order</strong><small>Modify position, Stop Loss and Take Profit</small><ChevronRight size={19} /></button><button className="rx-order-action close" onClick={() => setConfirm(true)}><strong>Close order</strong><small>Close at the current live market price</small><ChevronRight size={19} /></button></div>}
+      {!isClosed && view === "modify" && <>
+        <div className="rx-modify-head"><button onClick={() => setView("actions")}><ArrowLeft size={18} /> Back</button><strong>Modify position</strong></div>
+        <div className="rx-order-detail-grid"><div><small>Entry price</small><strong>{order.price}</strong></div><div><small>Current price</small><strong>{price}</strong></div><div><small>Volume</small><strong>{Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lots</strong></div><div><small>Floating P/L</small><strong className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</strong></div></div>
+        <div className="rx-order-setting"><span>Stop Loss</span><button className={`rx-switch ${slOn ? "on" : ""}`} onClick={() => setSlOn(!slOn)}><i /></button></div>
+        {slOn && <input className="rx-order-input" inputMode="decimal" value={stopLoss} onChange={(e) => setStopLoss(e.target.value)} placeholder="Stop loss price" />}
+        <div className="rx-order-setting"><span>Take Profit</span><button className={`rx-switch ${tpOn ? "on" : ""}`} onClick={() => setTpOn(!tpOn)}><i /></button></div>
+        {tpOn && <input className="rx-order-input" inputMode="decimal" value={takeProfit} onChange={(e) => setTakeProfit(e.target.value)} placeholder="Take profit price" />}
+        <button className="rx-order-save" onClick={() => onModify(order.id, slOn ? Number(stopLoss) || null : null, tpOn ? Number(takeProfit) || null : null)}>Save changes</button>
+        <button className="rx-order-close" onClick={() => setConfirm(true)}>Close order</button>
+      </>}
+      {isClosed && <div className="rx-closed-order-state"><Check size={28} /><strong>Order closed</strong><span>Closed at {order.close_price}</span><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div>}
+      {confirm && <div className="rx-close-confirm"><h3>Close position?</h3><div><span>Lot size</span><b>{Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</b></div><div><span>Closing price</span><b>{fmtPrice(price)}</b></div><div><span>Profit / Loss</span><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div><button onClick={() => onCloseOrder(order)}>Confirm close</button><button onClick={() => setConfirm(false)}>Cancel</button></div>}
     </section>
   </div>;
+}
+
+function fmtPrice(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0";
+  return n < 0.001 ? n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") : n.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
 function CreatorDashboard({ onBack, onManage, coin }) {
@@ -1211,6 +1219,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const [activeTab, setActiveTab] = useState("Overview");
   const [livePrice, setLivePrice] = useState(Number(market?.current_price || market?.initial_price || 0.000001));
   const [chartData, setChartData] = useState([]);
+  const [positionY, setPositionY] = useState(null);
   const [trades, setTrades] = useState([]);
   const [account, setAccount] = useState(null);
   const [tradeSheet, setTradeSheet] = useState(null);
@@ -1223,7 +1232,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const loadTrades = useCallback(async () => {
     if (!market?.id) return;
-    const { data } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).order("created_at", { ascending: false }).limit(100);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user?.id) return;
+    const { data } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(100);
     setTrades(data || []);
   }, [market?.id]);
 
@@ -1235,8 +1246,8 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     const loadAccount = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.id || !active) return;
-      const accountKey = "demo:" + user.id;
-      const { data } = await supabase.from("space_coin_accounts").upsert({ user_id: user.id, account_key: accountKey, mode: "demo" }, { onConflict: "account_key" }).select("*").single();
+      const accountKey = "real:" + user.id;
+      const { data } = await supabase.from("space_coin_accounts").upsert({ user_id: user.id, account_key: accountKey, mode: "real" }, { onConflict: "account_key" }).select("*").single();
       if (active && data) setAccount(data);
     };
     loadAccount();
@@ -1265,43 +1276,26 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const selectedPnl = (order) => Number(order?.side === "buy" ? (livePrice - Number(order.price)) * Number(order.quantity) : (Number(order.price) - livePrice) * Number(order.quantity));
 
   const executeTrade = async () => {
-    const input = Number(amount);
-    if (!market?.id || !tradeSheet || !input || input <= 0 || loadingTrade) return setNotice("Enter a valid amount.");
+    const quantity = Number(amount);
+    if (!market?.id || !tradeSheet || !Number.isFinite(quantity) || quantity <= 0 || loadingTrade) return setNotice("Choose a valid lot size.");
     setLoadingTrade(true); setNotice("");
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.id) throw new Error("Sign in to trade.");
-      const accountKey = "demo:" + user.id;
-      const { data: acct, error: accountError } = await supabase.from("space_coin_accounts").upsert({ user_id: user.id, account_key: accountKey, mode: "demo" }, { onConflict: "account_key" }).select("*").single();
-      if (accountError) throw accountError;
-      const price = Number(livePrice || market.current_price || market.initial_price || 0.000001);
-      const quantity = tradeSheet === "buy" ? input / price : input;
-      const balances = { ...(acct.token_balances || {}) };
-      const held = Number(balances[market.id] || 0);
-      const notional = tradeSheet === "buy" ? input : quantity * price;
-      const cash = Number(acct.cash_balance || 0);
-      if (tradeSheet === "buy" && cash < notional) throw new Error("Insufficient demo account balance.");
-      if (tradeSheet === "sell" && held < quantity) throw new Error("Not enough tokens to sell.");
-      balances[market.id] = tradeSheet === "buy" ? held + quantity : held - quantity;
-      const nextCash = tradeSheet === "buy" ? cash - notional : cash + notional;
-      const { error: updateError } = await supabase.from("space_coin_accounts").update({ cash_balance: nextCash, token_balances: balances, updated_at: new Date().toISOString() }).eq("id", acct.id);
-      if (updateError) throw updateError;
-      const { data: trade, error: tradeError } = await supabase.from("space_coin_trades").insert({ account_id: acct.id, user_id: user.id, coin_id: market.id, mode: "demo", side: tradeSheet, quantity, price, notional, status: "open" }).select("*").single();
-      if (tradeError) throw tradeError;
-      const movement = tradeSheet === "buy" ? 1.002 : 0.998;
-      const nextPrice = Number((price * movement).toPrecision(12));
-      const { error: tickError } = await supabase.from("space_coin_ticks").insert({ coin_id: market.id, price: nextPrice, open: price, high: Math.max(price, nextPrice), low: Math.min(price, nextPrice), close: nextPrice });
-      if (tickError) throw tickError;
-      const change24 = initial ? ((nextPrice - initial) / initial) * 100 : 0;
-      await supabase.from("space_coins").update({ current_price: nextPrice, price_change_24h: change24, volume_24h: Number(market.volume_24h || 0) + notional, updated_at: new Date().toISOString() }).eq("id", market.id);
-      setAccount({ ...acct, cash_balance: nextCash, token_balances: balances });
-      setLivePrice(nextPrice);
-      setTrades((old) => [trade, ...old].slice(0, 100));
-      setNotice(`${tradeSheet === "buy" ? "Bought" : "Sold"} ${fmt(quantity)} ${market.symbol} at $${fmt(price)}`);
+      const accountKey = "real:" + user.id;
+      const { data: result, error } = await supabase.rpc("execute_space_coin_trade", { p_account_key: accountKey, p_mode: "real", p_coin_id: market.id, p_side: tradeSheet, p_quantity: quantity });
+      if (error) throw error;
+      const price = Number(result?.price || livePrice);
+      const notional = Number(result?.notional || quantity * price);
+      const { data: latestAccount } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).single();
+      const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).order("created_at", { ascending: false }).limit(100);
+      setAccount(latestAccount || account);
+      setLivePrice(price);
+      setTrades(latestTrades || trades);
+      setNotice(`${tradeSheet === "buy" ? "Buy" : "Sell"} order opened: ${fmt(quantity)} lots @ $${fmt(price)} · ${formatMoney(notional)}`);
       setAmount(""); setTradeSheet(null);
-    } catch (error) {
-      setNotice(error?.message || "Trade failed.");
-    } finally { setLoadingTrade(false); }
+    } catch (error) { setNotice(error?.message || "Trade failed."); }
+    finally { setLoadingTrade(false); }
   };
 
   const modifyOrder = async (id, stopLoss, takeProfit) => {
@@ -1315,27 +1309,29 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const closeOrder = async (order) => {
     if (!order?.id || !account?.id) return;
     const price = Number(livePrice);
-    const quantity = Number(order.quantity);
-    const balances = { ...(account.token_balances || {}) };
-    const held = Number(balances[market.id] || 0);
-    const cash = Number(account.cash_balance || 0);
-    const proceeds = quantity * price;
-    if (order.side === "buy") {
-      if (held < quantity) return setNotice("Not enough tokens remain to close this position.");
-      balances[market.id] = held - quantity;
-    } else {
-      if (cash < proceeds) return setNotice("Insufficient demo balance to close this sell position.");
-      balances[market.id] = held + quantity;
-    }
-    const nextCash = order.side === "buy" ? cash + proceeds : cash - proceeds;
-    const { error: accountError } = await supabase.from("space_coin_accounts").update({ cash_balance: nextCash, token_balances: balances, updated_at: new Date().toISOString() }).eq("id", account.id);
-    if (accountError) return setNotice(accountError.message || "Unable to close order.");
-    const { data, error } = await supabase.from("space_coin_trades").update({ status: "closed", close_price: price, closed_at: new Date().toISOString() }).eq("id", order.id).select("*").single();
-    if (error) return setNotice(error.message || "Unable to close order.");
-    setAccount({ ...account, cash_balance: nextCash, token_balances: balances });
-    setTrades((old) => old.map((row) => row.id === order.id ? data : row));
-    setSelectedOrder(null); setOrdersSheet(false); setNotice(`Order closed ${selectedPnl(order) >= 0 ? "in profit" : "at a loss"}.`);
+    if (!Number.isFinite(price) || price <= 0) return setNotice("Live price is unavailable.");
+    try {
+      const { data, error } = await supabase.rpc("close_space_coin_trade", { p_trade_id: order.id, p_close_price: price });
+      if (error) throw error;
+      const latestAccount = await supabase.from("space_coin_accounts").select("*").eq("id", account.id).single();
+      setAccount(latestAccount.data || account);
+      setTrades((old) => old.map((row) => row.id === order.id ? (data?.trade || { ...row, status: "closed", close_price: price, closed_at: new Date().toISOString() }) : row));
+      setSelectedOrder(null); setOrdersSheet(false);
+      const pnl = Number(data?.pnl ?? selectedPnl({ ...order, close_price: price }));
+      setNotice(`Order closed. ${pnl >= 0 ? "Profit" : "Loss"}: ${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}. Balance updated.`);
+    } catch (error) { setNotice(error?.message || "Unable to close order."); }
   };
+
+  useEffect(() => {
+    if (!livePrice || !openOrders.length) return;
+    openOrders.forEach((order) => {
+      const sl = Number(order.stop_loss), tp = Number(order.take_profit);
+      const hitSL = Number.isFinite(sl) && sl > 0 && (order.side === "buy" ? livePrice <= sl : livePrice >= sl);
+      const hitTP = Number.isFinite(tp) && tp > 0 && (order.side === "buy" ? livePrice >= tp : livePrice <= tp);
+      if (hitSL || hitTP) closeOrder(order);
+    });
+  }, [livePrice]);
+
 
   if (!market) return <main className="rx-native-screen"><style>{styles + createStyles + detailStyles}</style><NativeHeader title="Space Coin" onBack={onBack} /><div className="rx-native-scroll"><div className="rx-empty-coins"><strong>No Space Coins yet</strong><span>Create your first Space Coin and it will appear here.</span></div></div></main>;
 
@@ -1359,12 +1355,12 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
       {activeTab === "Overview" && <>
         <section className="rx-detail-chart-wrap">
-          <CoinPriceChart coin={market} range={range} chartType={chartType} onPriceChange={handlePriceChange} />
-          {primaryOrder && <button className={`rx-position-card ${primaryPnl >= 0 ? "profit" : "loss"}`} onClick={() => setOrdersSheet(true)}><span>{primaryOrder.side === "buy" ? "Buy" : "Sell"}</span><strong>{Number(primaryOrder.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</strong><b>{primaryPnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(primaryPnl))}</b></button>}
+          <CoinPriceChart coin={market} range={range} chartType={chartType} onPriceChange={handlePriceChange} onPriceCoordinate={setPositionY} />
+          {primaryOrder && <button className={`rx-position-marker ${primaryOrder.side === "buy" ? "buy" : "sell"}`} style={{ top: `${Math.max(8, Math.min(225, Number.isFinite(positionY) ? positionY - 15 : 26))}px` }} onClick={() => setOrdersSheet(true)} aria-label="Open position details"><span>{Number(primaryOrder.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</span><b className={primaryPnl >= 0 ? "profit" : "loss"}>{primaryPnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(primaryPnl))}</b></button>}
         </section>
         <div className="rx-chart-mode"><button className={chartType === "line" ? "active" : ""} onClick={() => setChartType("line")}>Line</button><button className={chartType === "candles" ? "active" : ""} onClick={() => setChartType("candles")}>Candlesticks</button></div>
         <div className="rx-detail-range">{[['24h','24 Hours'],['7d','7 Days'],['1m','1 Month'],['3m','3 Months']].map(([key,label]) => <button key={key} className={range === key ? "active" : ""} onClick={() => setRange(key)}>{label}</button>)}</div>
-        <section className="rx-detail-summary"><div><span>Market Cap</span><strong>${Number(market.market_cap || Number(market.total_supply || 0) * livePrice).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>24h Volume</span><strong>${Number(market.volume_24h || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>24h High</span><strong>${fmt(high)}</strong></div><div><span>24h Low</span><strong>${fmt(low)}</strong></div></section>
+        
       </>}
       {activeTab === "Statistics" && <section className="rx-detail-stat-card"><div><span>Market Cap</span><strong>${Number(market.market_cap || Number(market.total_supply || 0) * livePrice).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Liquidity</span><strong>${Number(market.liquidity || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>24h Volume</span><strong>${Number(market.volume_24h || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Holders</span><strong>{Number(market.holder_count || 0).toLocaleString()}</strong></div><div><span>Total Supply</span><strong>{Number(market.total_supply || 0).toLocaleString()}</strong></div><div><span>Network</span><strong>{market.network || "Solana"}</strong></div></section>}
       {activeTab === "History data" && <section className="rx-detail-history-card">{trades.length ? trades.map((trade) => <button key={trade.id} className="rx-detail-history-row" onClick={() => setSelectedOrder(trade)}><span className={trade.side === "buy" ? "buy" : "sell"}>{trade.side === "buy" ? "Buy" : "Sell"}</span><div><strong>{Number(trade.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</strong><small>{new Date(trade.created_at).toLocaleString()}</small></div><b className={(trade.status || "open") === "closed" ? (Number(trade.close_price) - Number(trade.price)) * (trade.side === "buy" ? 1 : -1) >= 0 ? "profit" : "loss" : "profit"}>{trade.status === "closed" ? formatMoney((Number(trade.close_price) - Number(trade.price)) * Number(trade.quantity) * (trade.side === "buy" ? 1 : -1)) : formatMoney(selectedPnl(trade))}</b></button>) : <div className="rx-detail-empty-history">No trades yet. Your real trades will appear here.</div>}</section>}
@@ -1373,7 +1369,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
     <div className="rx-detail-actions"><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button><button className="rx-detail-bell" onClick={() => setOrdersSheet(true)} aria-label="Orders"><Bell size={23} /></button></div>
 
-    {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Current price ${fmt(livePrice)}</p><label>{tradeSheet === "buy" ? "Amount in USD" : "Lot size"}<input autoFocus type="number" min="0" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" /></label>{amount && <div className="rx-trade-preview"><span>Lot size</span><strong>{fmt(tradeSheet === "buy" ? Number(amount) / livePrice : Number(amount))}</strong></div>}<button className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `${tradeSheet === "buy" ? "Buy" : "Sell"} ${market.symbol}`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
+    {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Order size</span><strong>{fmt(Number(amount))} lots · {formatMoney(Number(amount) * Number(livePrice))}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
     {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
     {selectedOrder && <OrderDetailSheet market={market} order={selectedOrder} livePrice={livePrice} onClose={() => setSelectedOrder(null)} onModify={modifyOrder} onCloseOrder={closeOrder} />}
   </main>;
@@ -1403,6 +1399,16 @@ const detailStyles = `
 .rx-detail-wallet{border:0;background:transparent;color:#111418;padding:0;cursor:pointer;text-align:left;position:relative}.rx-detail-wallet em{font-style:normal;position:absolute;right:-10px;top:-8px;min-width:16px;height:16px;border-radius:8px;padding:0 4px;background:#d7a21a;color:#fff;font-size:8px;display:grid;place-items:center}
 .rx-order-backdrop,.rx-trade-sheet-backdrop{touch-action:none}.rx-order-backdrop{position:absolute;inset:0;z-index:45;background:rgba(17,20,24,.38);display:flex;align-items:flex-end}.rx-order-sheet,.rx-order-detail-sheet{width:100%;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.2);will-change:transform;touch-action:none;overflow:hidden}.rx-order-sheet{height:72dvh}.rx-order-detail-sheet{height:82dvh;padding-bottom:calc(14px + env(safe-area-inset-bottom));overflow:auto;touch-action:none}.rx-sheet-drag-handle{width:42px;height:4px;border-radius:9px;background:#d8dadd;margin:10px auto 13px}.rx-order-tabs{height:55px;display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #e7e8ea}.rx-order-tabs button{border:0;border-bottom:3px solid transparent;background:#fff;color:#858a90;font:500 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-list{height:calc(100% - 69px);overflow:auto;-webkit-overflow-scrolling:touch}.rx-order-row{width:100%;min-height:76px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:48px 1fr auto;gap:9px;align-items:center;text-align:left;padding:10px 18px;cursor:pointer}.rx-order-side{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:10px;font-weight:800}.rx-order-side.buy{background:#eaf8f1;color:#39a878}.rx-order-side.sell{background:#fdeceb;color:#d94c4c}.rx-order-row strong,.rx-order-row small{display:block}.rx-order-row strong{font-size:13px}.rx-order-row small{margin-top:4px;color:#858a90;font-size:9px}.rx-order-row b{font-size:11px;text-align:right}.profit{color:#39ad7a!important}.loss{color:#d94c4c!important}.rx-order-empty{min-height:52vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:25px;color:#747a80}.rx-order-empty strong{font-size:17px;color:#111418}.rx-order-empty span{margin-top:8px;max-width:260px;font-size:11px;line-height:1.45}.rx-order-detail-head{height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 18px}.rx-order-detail-head strong{font-size:16px}.rx-order-detail-head button{border:0;background:transparent;color:#111418}.rx-order-detail-summary{display:flex;justify-content:space-between;align-items:center;padding:12px 18px 15px}.rx-order-detail-summary strong,.rx-order-detail-summary small{display:block}.rx-order-detail-summary strong{font-size:16px}.rx-order-detail-summary small{margin-top:5px;color:#7f858b;font-size:10px}.rx-order-detail-summary>b{font-size:15px}.rx-order-detail-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid #e6e8ea;margin:0 18px}.rx-order-detail-tabs button{height:44px;border:0;background:#fff;color:#858a90;border-bottom:3px solid transparent;font:500 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-detail-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #edf0f2;margin:0 18px}.rx-order-detail-grid>div{padding:14px 0;border-bottom:1px solid #edf0f2}.rx-order-detail-grid>div:nth-child(odd){border-right:1px solid #edf0f2;padding-right:12px}.rx-order-detail-grid>div:nth-child(even){padding-left:12px}.rx-order-detail-grid small,.rx-order-detail-grid strong{display:block}.rx-order-detail-grid small{font-size:9px;color:#858a90}.rx-order-detail-grid strong{margin-top:5px;font-size:12px}.rx-order-setting{height:52px;margin:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f2;font-size:13px}.rx-switch{width:45px;height:26px;border:0;border-radius:14px;background:#d2d5d8;padding:3px;display:flex;align-items:center;justify-content:flex-start}.rx-switch i{display:block;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.16)}.rx-switch.on{background:#d7a21a;justify-content:flex-end}.rx-order-input{display:block;width:calc(100% - 36px);height:42px;margin:8px 18px;border:1px solid #e0e3e6;border-radius:11px;padding:0 11px;outline:0;font:600 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save,.rx-order-close{width:calc(100% - 36px);height:47px;margin:10px 18px 0;border:0;border-radius:13px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save{background:#f4d35e;color:#111418}.rx-order-close{background:#f2f3f5;color:#111418}.rx-close-confirm{position:absolute;left:12px;right:12px;bottom:12px;z-index:4;background:#fff;border-radius:22px;padding:20px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 8px 35px rgba(17,20,24,.2);border:1px solid #eceeef}.rx-close-confirm h3{margin:0 0 16px;font-size:19px}.rx-close-confirm>div{display:flex;justify-content:space-between;padding:8px 0;color:#737980;font-size:12px}.rx-close-confirm>div b{color:#111418}.rx-close-confirm button{width:100%;height:46px;border:0;border-radius:12px;margin-top:8px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-confirm button:first-of-type{background:#f4d35e;color:#111418}.rx-close-confirm button:last-of-type{background:#f1f2f4;color:#111418}
 .rx-trade-sheet{touch-action:none}.rx-trade-preview{display:flex;align-items:center;justify-content:space-between;margin-top:9px;padding:9px 11px;border-radius:11px;background:#f5f6f7}.rx-trade-preview span{font-size:10px;color:#7f858b}.rx-trade-preview strong{font-size:12px}
+
+/* Minimal trading refinements: compact position marker, real lot selection, and smaller action controls. */
+.rx-position-marker{position:absolute;right:2px;z-index:8;display:flex;align-items:stretch;height:30px;border:0;padding:0;background:transparent;filter:drop-shadow(0 3px 8px rgba(17,20,24,.12));cursor:pointer}
+.rx-position-marker span{min-width:52px;padding:0 9px;border-radius:8px 0 0 8px;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;color:#fff}
+.rx-position-marker b{min-width:86px;padding:0 9px;border:1.5px solid currentColor;border-left:0;border-radius:0 8px 8px 0;background:#fff;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+.rx-position-marker.buy span{background:#F4D35E;color:#111418}.rx-position-marker.sell span{background:#111418;color:#fff}.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
+.rx-detail-actions{height:68px;padding:7px 13px calc(7px + env(safe-area-inset-bottom));grid-template-columns:1fr 1fr 54px;gap:8px}.rx-detail-actions button{height:54px;border-radius:15px;font-size:14px}.rx-detail-bell{width:54px}
+.rx-trade-sheet{padding:9px 16px calc(14px + env(safe-area-inset-bottom));border-radius:22px 22px 0 0}.rx-trade-sheet h3{font-size:18px}.rx-trade-sheet p{margin-bottom:13px}.rx-lot-label{display:flex;justify-content:space-between;align-items:center;color:#565c62;font-size:11px;font-weight:700;margin-bottom:7px}.rx-lot-label span:last-child{font-size:9px;color:#92979d;font-weight:600}.rx-lot-stepper{height:52px;border:1px solid #e0e3e6;border-radius:12px;display:grid;grid-template-columns:48px 1fr 48px;align-items:center;overflow:hidden}.rx-lot-stepper button{height:100%;border:0;background:#fff;font-size:25px;color:#6f757b}.rx-lot-stepper input{width:100%;height:100%;border:0;text-align:center;outline:0;font:700 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-lot-presets{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:8px}.rx-lot-presets button{height:31px;border:1px solid #e2e4e7;border-radius:9px;background:#fff;color:#777d83;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-lot-presets button.active{border-color:#111418;color:#111418;background:#f7f7f7}.rx-trade-preview{margin-top:8px;padding:8px 10px}.rx-trade-sheet>button{height:47px;margin-top:10px}.rx-trade-sheet>button:disabled{opacity:.45}
+.rx-order-action-menu{padding:7px 18px 20px}.rx-order-action{width:100%;min-height:66px;margin-top:8px;border:1px solid #e9ebed;border-radius:15px;background:#fff;display:grid;grid-template-columns:1fr 22px;gap:2px;text-align:left;padding:13px 14px;align-items:center}.rx-order-action strong{font-size:14px;color:#111418}.rx-order-action small{font-size:9px;color:#858a90;grid-column:1}.rx-order-action svg{grid-column:2;grid-row:1 / span 2}.rx-order-action.close{background:#fafafa}.rx-order-action.close strong{color:#111418}.rx-modify-head{height:42px;padding:0 18px;display:flex;align-items:center;gap:18px;border-bottom:1px solid #edf0f2}.rx-modify-head button{border:0;background:transparent;display:flex;align-items:center;gap:5px;font:700 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-modify-head strong{font-size:15px}.rx-closed-order-state{min-height:38vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#747a80}.rx-closed-order-state svg{color:#39ad7a}.rx-closed-order-state strong{font-size:18px;color:#111418}.rx-closed-order-state span{font-size:10px}.rx-closed-order-state b{font-size:18px}
+
 `;
 
 function LiquidityScreen({ onBack, remove = false }) {
