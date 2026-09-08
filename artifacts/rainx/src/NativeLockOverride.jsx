@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Delete, Fingerprint, ScanFace } from "lucide-react";
-import { Capacitor } from "@capacitor/core";
 import rainxLogoTransparent from "./assets/rainx-logo-transparent.png";
 import {
   authenticateNativeLock,
@@ -55,7 +54,7 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   const unlockTimer = useRef(null);
 
   const refreshConfig = async () => {
-    if (!Capacitor.isNativePlatform() || !account?.id) return;
+    if (!account?.id) return;
     const [next, biometry] = await Promise.all([
       getNativeLockConfig(account.id), getNativeBiometryInfo(),
     ]);
@@ -73,7 +72,7 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      if (!Capacitor.isNativePlatform() || !account?.id) {
+      if (!account?.id) {
         if (mounted) setLocked(false);
         return;
       }
