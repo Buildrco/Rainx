@@ -10,6 +10,13 @@ import {
   BrainCircuit, Cpu, Palette, Globe, Trash2, UserX, Download, FileCheck, Cookie, Database, Coins, Copy, RefreshCw,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import { Capacitor } from "@capacitor/core";
+import {
+  getNativeLockConfig,
+  saveNativePin,
+  setNativeAppLock,
+  setNativeBiometricEnabled,
+} from "./nativeSecurity";
 import CommunityTab, { ProfileFeed as CommunityProfileFeed, Composer as CommunityComposer, FollowListModal, Badge as CommunityBadge, formatCount } from "./CommunityTab";
 import { registerNativeBackHandler } from "./nativeBackStack";
 import { useNativeBottomSheet } from "./nativeBottomSheet";
@@ -5651,7 +5658,12 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       delete backendSafe.pinHash;
       delete backendSafe.biometricCredentialId;
       if (account?.id) {
-        supabase.from("account_settings").upsert({ user_id: account.id, security_prefs: backendSafe, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
+        supabase.from("account_settings").upsert({
+          user_id: account.id,
+          settings: settingsPrefs,
+          security_prefs: backendSafe,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
       }
       return next;
     });
@@ -5661,7 +5673,12 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       const next = { ...prev, ...patch };
       lsSet("rainx-settings-prefs", JSON.stringify(next));
       if (account?.id) {
-        supabase.from("account_settings").upsert({ user_id: account.id, settings: next, updated_at: new Date().toISOString() }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
+        supabase.from("account_settings").upsert({
+          user_id: account.id,
+          settings: next,
+          security_prefs: securityPrefs,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
       }
       return next;
     });
@@ -5672,15 +5689,51 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     (async () => {
       const { data, error } = await supabase.from("account_settings").select("settings,security_prefs").eq("user_id", account.id).maybeSingle();
       if (cancelled) return;
+      const nativeConfig = Capacitor.isNativePlatform()
+        ? await getNativeLockConfig(account.id).catch(() => null)
+        : null;
       if (!error && data) {
         if (data.settings && typeof data.settings === "object") {
-          setSettingsPrefs(prev => ({ ...prev, ...data.settings }));
-          lsSet("rainx-settings-prefs", JSON.stringify({ ...settingsPrefs, ...data.settings }));
+          setSettingsPrefs(prev => {
+            const next = { ...prev, ...data.settings };
+            lsSet("rainx-settings-prefs", JSON.stringify(next));
+            if (next.postVisibility) setPostVisibility(next.postVisibility);
+            if (next.theme && ["light", "dark", "system"].includes(next.theme)) {
+              setThemeMode(next.theme);
+              lsSet("rainx-theme", next.theme);
+            }
+            return next;
+          });
         }
         if (data.security_prefs && typeof data.security_prefs === "object") {
-          setSecurityPrefs(prev => ({ ...prev, ...data.security_prefs }));
-          lsSet("rainx-security-prefs", JSON.stringify({ ...securityPrefs, ...data.security_prefs }));
+          setSecurityPrefs(prev => {
+            const next = {
+              ...prev,
+              ...data.security_prefs,
+              ...(nativeConfig ? {
+                pinEnabled: nativeConfig.pinEnabled,
+                appLock: nativeConfig.appLock,
+                biometricEnabled: nativeConfig.biometricEnabled,
+                pinLength: nativeConfig.pinLength,
+              } : {}),
+            };
+            lsSet("rainx-security-prefs", JSON.stringify(next));
+            return next;
+          });
         }
+      }
+      if (nativeConfig && (!data?.security_prefs || error)) {
+        setSecurityPrefs(prev => {
+          const next = {
+            ...prev,
+            pinEnabled: nativeConfig.pinEnabled,
+            appLock: nativeConfig.appLock,
+            biometricEnabled: nativeConfig.biometricEnabled,
+            pinLength: nativeConfig.pinLength,
+          };
+          lsSet("rainx-security-prefs", JSON.stringify(next));
+          return next;
+        });
       }
       setAccountSettingsLoaded(true);
     })();
@@ -5716,13 +5769,25 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     if (!/^\d{4,6}$/.test(pinValue)) { setPinError("Enter a 4–6 digit PIN."); return; }
     if (pinValue !== pinConfirm) { setPinError("PINs do not match."); return; }
     try {
-      const hash = await hashPin(pinValue);
-      persistSecurity({ pinEnabled: true, pinHash: hash });
+      if (Capacitor.isNativePlatform()) {
+        await saveNativePin(pinValue, account?.id);
+        persistSecurity({ pinEnabled: true, appLock: true, pinLength: pinValue.length });
+      } else {
+        const hash = await hashPin(pinValue);
+        persistSecurity({ pinEnabled: true, appLock: true, pinLength: pinValue.length, pinHash: hash });
+      }
       setPinValue(""); setPinConfirm(""); setSecuritySheet(null);
-    } catch { setPinError("Unable to save PIN on this device."); }
+    } catch (error) {
+      setPinError(error?.message || "Unable to save PIN on this device.");
+    }
   };
   const setupPasskey = async () => {
     try {
+      if (Capacitor.isNativePlatform()) {
+        await setNativeBiometricEnabled(true, account?.id);
+        persistSecurity({ biometricEnabled: true, appLock: true });
+        return;
+      }
       if (!("PublicKeyCredential" in window) || !navigator.credentials?.create) {
         alert("Face ID / device passkeys are not supported on this device or browser.");
         return;
@@ -5747,10 +5812,31 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       }});
       if (credential?.rawId) {
         const id = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
-        persistSecurity({ biometricEnabled: true, biometricCredentialId: id });
+        persistSecurity({ biometricEnabled: true, biometricCredentialId: id, appLock: true });
       }
     } catch (e) {
-      if (e?.name !== "NotAllowedError") alert("Face ID / passkey setup could not be completed.");
+      if (e?.name !== "NotAllowedError") alert(e?.message || "Face ID / passkey setup could not be completed.");
+    }
+  };
+  const disableBiometric = async () => {
+    try {
+      if (Capacitor.isNativePlatform()) await setNativeBiometricEnabled(false, account?.id);
+      persistSecurity({ biometricEnabled: false, appLock: securityPrefs.pinEnabled ? securityPrefs.appLock : false });
+    } catch (error) {
+      alert(error?.message || "Unable to disable biometric unlock.");
+    }
+  };
+  const toggleAppLock = async () => {
+    const enabled = !(securityPrefs.appLock ?? false);
+    if (enabled && !(securityPrefs.pinEnabled || securityPrefs.biometricEnabled)) {
+      setSecuritySheet("appLockSetup");
+      return;
+    }
+    try {
+      if (Capacitor.isNativePlatform()) await setNativeAppLock(enabled, account?.id);
+      persistSecurity({ appLock: enabled });
+    } catch (error) {
+      alert(error?.message || "Unable to update App Lock.");
     }
   };
   useEffect(() => {
@@ -6164,7 +6250,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
                 const selected = themeMode === val;
                 const mode = val === "system" ? "split" : val;
                 return (
-                  <button key={val} onClick={() => { lsSet("rainx-theme", val); setThemeMode(val); }} style={{ flex:1, background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:10 }}>
+                 <button key={val} onClick={() => { lsSet("rainx-theme", val); setThemeMode(val); persistSettings({ theme: val }); }} style={{ flex:1, background:"none", border:"none", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:10 }}>
                     {renderAppearancePhone(mode)}
                     <div style={{ width:22, height:22, borderRadius:"50%", border: "2px solid " + (selected ? "#4a6d7c" : "#cfcfcf"), display:"flex", alignItems:"center", justifyContent:"center" }}>
                       {selected && <div style={{ width:12, height:12, borderRadius:"50%", background:"#4a6d7c" }} />}
@@ -6887,7 +6973,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
 
         <LightSection title="Your posts">
           {[["public","Public — everyone","Anyone can view your posts"],["followers","Followers only","Only your followers can view your posts"],["premium","Subscribers only","Only eligible subscribers can view your posts"]].map(([value,title,desc],i)=>{
-            return <React.Fragment key={value}>{i>0&&<LightDivider/>}<LightRow icon={FileText} title={title} subtitle={desc} onPress={()=>{setPostVisibility(value);lsSet("rainx-post-visibility",value)}} right={<div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${postVisibility===value?PREF_YELLOW:"#C9CED4"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>{postVisibility===value&&<div style={{width:10,height:10,borderRadius:"50%",background:PREF_YELLOW}}/>}</div>} /></React.Fragment>;
+            return <React.Fragment key={value}>{i>0&&<LightDivider/>}<LightRow icon={FileText} title={title} subtitle={desc} onPress={()=>{setPostVisibility(value);persistSettings({ postVisibility: value });lsSet("rainx-post-visibility",value)}} right={<div style={{width:20,height:20,borderRadius:"50%",border:`2px solid ${postVisibility===value?PREF_YELLOW:"#C9CED4"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>{postVisibility===value&&<div style={{width:10,height:10,borderRadius:"50%",background:PREF_YELLOW}}/>}</div>} /></React.Fragment>;
           })}
         </LightSection>
 
@@ -7036,11 +7122,11 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         </LightSection>
 
         <LightSection title="Device security">
-          <LightRow icon={Lock} title="App Lock" subtitle="Require device authentication before opening RainX" onPress={()=>{ if (!(securityPrefs.pinEnabled || securityPrefs.biometricEnabled)) { setSecuritySheet("appLockSetup"); return; } persistSecurity({appLock:!(securityPrefs.appLock ?? false)}); }} right={<LightToggle on={securityPrefs.appLock ?? false} onChange={()=>{ if (!(securityPrefs.pinEnabled || securityPrefs.biometricEnabled)) { setSecuritySheet("appLockSetup"); return; } persistSecurity({appLock:!(securityPrefs.appLock ?? false)}); }} />} />
+           <LightRow icon={Lock} title="App Lock" subtitle="Require device authentication before opening RainX" onPress={toggleAppLock} right={<LightToggle on={securityPrefs.appLock ?? false} onChange={toggleAppLock} />} />
           <LightDivider />
           <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
           <LightDivider />
-          <LightRow icon={Smartphone} title="Face ID / Device Passkey" subtitle={securityPrefs.biometricEnabled?"Biometric sign-in is enabled on this device":"Use Face ID, fingerprint or device biometrics"} onPress={setupPasskey} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.biometricEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.biometricEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.biometricEnabled?"ENABLED":"SET UP"}</span>} />
+           <LightRow icon={Smartphone} title="Face ID / Device Passkey" subtitle={securityPrefs.biometricEnabled?"Biometric unlock is enabled on this device":"Use Face ID, fingerprint or device biometrics"} onPress={securityPrefs.biometricEnabled ? disableBiometric : setupPasskey} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.biometricEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.biometricEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.biometricEnabled?"DISABLE":"SET UP"}</span>} />
         </LightSection>
 
         <LightSection title="Account protection">
