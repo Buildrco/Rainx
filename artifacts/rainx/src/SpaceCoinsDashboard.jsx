@@ -175,15 +175,15 @@ function CoinList({ coins = COINS, onSelect }) {
 
       <div className="rx-coin-list">
         {coins.map((coin) => (
-          <button className="rx-coin-row" key={coin.id || coin.ticker} onClick={() => onSelect?.(coin)}>
+          <button className="rx-coin-row" key={coin.id || coin.ticker || coin.symbol} onClick={() => onSelect?.(coin)}>
             <img src={coin.image_url || coin.image} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
             <span className="rx-coin-name">
               <strong>{coin.name}</strong>
-              <small>{coin.ticker}</small>
+              <small>{coin.symbol || coin.ticker || "COIN"}</small>
             </span>
             <span className="rx-coin-value">
-              <strong>{coin.price}</strong>
-              <small>{coin.change}</small>
+              <strong>{coin.price || (Number.isFinite(Number(coin.current_price)) ? "$" + Number(coin.current_price).toFixed(6) : "—")}</strong>
+              <small>{coin.change || (Number.isFinite(Number(coin.price_change_24h)) ? (Number(coin.price_change_24h) >= 0 ? "+" : "") + Number(coin.price_change_24h).toFixed(2) + "%" : "—")}</small>
             </span>
           </button>
         ))}
@@ -534,10 +534,17 @@ function CreateCoin({ onBack, onCreated }) {
               <label className="rx-upload">
                 <input
                   type="file"
-                  accept="image/png,image/jpeg"
-                  onChange={(e) =>
-                    setLogo(e.target.files?.[0] || null)
-                  }
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    if (file && file.size > 5 * 1024 * 1024) {
+                      setError("Image must be 5MB or smaller.");
+                      e.target.value = "";
+                      return;
+                    }
+                    setError("");
+                    setLogo(file);
+                  }}
                 />
 
                 <span className="rx-upload-circle">
@@ -945,9 +952,8 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       if (values.length) setLivePrice(values[values.length - 1]);
     };
     load();
-    const channel = market.id ? supabase.channel("space-coin-ticks-" + market.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "space_coin_ticks", filter: "coin_id=eq." + market.id }, (payload) => { const next = Number(payload.new?.close || payload.new?.price); if (next) { setLivePrice(next); setPrices((old) => [...old.slice(-119), next]); } }).subscribe() : null;
-    const timer = window.setInterval(() => setLivePrice((old) => Number(Math.max(old * 0.97, old + old * ((Math.random() - 0.48) * 0.012)).toFixed(8))), 2500);
-    return () => { active = false; window.clearInterval(timer); if (channel) supabase.removeChannel(channel); };
+    const channel = market.id ? supabase.channel("space-coin-ticks-" + market.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "space_coin_ticks", filter: "coin_id=eq." + market.id }, (payload) => { const next = Number(payload.new?.close || payload.new?.price); if (next) { setLivePrice(next); setPrices((old) => old[old.length - 1] === next ? old : [...old.slice(-119), next]); } }).subscribe() : null;
+    return () => { active = false; if (channel) supabase.removeChannel(channel); };
   }, [market.id]);
 
   const chartValues = [...prices.slice(-32), livePrice].filter(Boolean);
@@ -978,6 +984,12 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       if (updateError) throw updateError;
       const { error: tradeError } = await supabase.from("space_coin_trades").insert({ account_id: account.id, user_id: user.id, coin_id: market.id, mode: accountMode, side: tradeMode, quantity, price, notional });
       if (tradeError) throw tradeError;
+      const nextPrice = Number((price * (tradeMode === "buy" ? 1.002 : 0.998)).toPrecision(10));
+      const { error: tickError } = await supabase.from("space_coin_ticks").insert({ coin_id: market.id, price: nextPrice, open: price, high: Math.max(price, nextPrice), low: Math.min(price, nextPrice), close: nextPrice });
+      if (!tickError) {
+        setLivePrice(nextPrice);
+        setPrices((old) => old[old.length - 1] === nextPrice ? old : [...old.slice(-119), nextPrice]);
+      }
       setNotice((tradeMode === "buy" ? "Bought " : "Sold ") + fmt(quantity) + " " + market.symbol + " at $" + fmt(price));
       setAmount("");
     } catch (error) { setNotice(error?.message || "Trade failed."); }
@@ -1395,11 +1407,11 @@ const createStyles = `
 .rx-progress span.on{background:#F4D35E}
 
 .rx-upload{
-  border:1px dashed #D8DADC;border-radius:15px;padding:16px;
+  position:relative;border:1px dashed #D8DADC;border-radius:15px;padding:16px;
   display:flex;flex-direction:column;align-items:center;
   justify-content:center;background:#FAFAFA;cursor:pointer
 }
-.rx-upload input{display:none}
+.rx-upload input{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;cursor:pointer}
 .rx-upload-circle{
   width:72px;height:72px;border-radius:50%;display:grid;
   place-items:center;background:#FFF7DA;color:#D7A21A;
