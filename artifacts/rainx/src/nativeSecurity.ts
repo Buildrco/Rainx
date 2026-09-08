@@ -42,6 +42,20 @@ function emitConfigChanged() {
   try { window.dispatchEvent(new Event(CONFIG_EVENT)); } catch {}
 }
 
+function getBrowserSecurityPrefs(): Record<string, any> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const value = localStorage.getItem("rainx-security-prefs");
+    return value ? JSON.parse(value) : {};
+  } catch { return {}; }
+}
+
+function saveBrowserSecurityPrefs(patch: Record<string, unknown>) {
+  if (typeof localStorage === "undefined") return;
+  const next = { ...getBrowserSecurityPrefs(), ...patch };
+  try { localStorage.setItem("rainx-security-prefs", JSON.stringify(next)); } catch {}
+}
+
 export function hasNativeUnlockedSession(accountId?: string) {
   if (!accountId || typeof sessionStorage === "undefined") return false;
   try { return sessionStorage.getItem(SESSION_UNLOCK_KEY) === accountId; } catch { return false; }
@@ -131,7 +145,17 @@ async function migratePinStorage(accountId?: string) {
 
 export async function getNativeLockConfig(accountId?: string): Promise<NativeLockConfig> {
   if (!native()) {
-    return { pinEnabled: false, appLock: false, biometricEnabled: false, pinLength: 4, pinLengthKnown: true };
+    const prefs = getBrowserSecurityPrefs();
+    const hasStoredPin = typeof prefs.pinHash === "string" && prefs.pinHash.length > 0;
+    const pinEnabled = prefs.pinEnabled === true && hasStoredPin;
+    const biometricEnabled = prefs.biometricEnabled === true;
+    return {
+      pinEnabled,
+      appLock: prefs.appLock === true && (pinEnabled || biometricEnabled),
+      biometricEnabled,
+      pinLength: Math.max(4, Math.min(6, Number(prefs.pinLength) || 4)),
+      pinLengthKnown: true,
+    };
   }
 
   const resolved = await resolveAccountId(accountId);
@@ -166,10 +190,15 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
 }
 
 export async function saveNativePin(pin: string, accountId?: string) {
-  if (!native()) throw new Error("PIN lock is available in the native app only.");
   if (!/^\d{4,6}$/.test(pin)) throw new Error("PIN must contain 4–6 digits.");
   const resolved = await resolveAccountId(accountId);
   if (!resolved) throw new Error("Your account session is not ready.");
+
+  if (!native()) {
+    saveBrowserSecurityPrefs({ pinHash: await sha256(pin), pinLength: pin.length, pinEnabled: true, appLock: true });
+    emitConfigChanged();
+    return;
+  }
 
   const keys = keySet(resolved);
   await secureSet(keys.pinHash, await sha256(pin));
@@ -195,7 +224,8 @@ async function findMatchingPinKey(pin: string, accountId?: string) {
 }
 
 export async function verifyNativePin(pin: string, accountId?: string): Promise<boolean> {
-  if (!native() || !/^\d{4,6}$/.test(pin)) return false;
+  if (!/^\d{4,6}$/.test(pin)) return false;
+  if (!native()) return getBrowserSecurityPrefs().pinHash === await sha256(pin);
   await getNativeLockConfig(accountId);
   return !!(await findMatchingPinKey(pin, accountId));
 }
@@ -230,7 +260,16 @@ export async function disableNativePin(first: string, second?: string) {
 }
 
 export async function setNativeAppLock(enabled: boolean, accountId?: string) {
-  if (!native()) return;
+  if (!native()) {
+    const prefs = getBrowserSecurityPrefs();
+    if (enabled && !prefs.pinEnabled && !prefs.biometricEnabled) {
+      throw new Error("Set up a PIN or device biometric first.");
+    }
+    saveBrowserSecurityPrefs({ appLock: enabled });
+    if (!enabled) clearNativeSessionUnlock();
+    emitConfigChanged();
+    return;
+  }
   const resolved = await resolveAccountId(accountId);
   if (!resolved) throw new Error("Your account session is not ready.");
 
@@ -283,7 +322,7 @@ export async function getNativeBiometryInfo() {
 }
 
 export async function authenticateNativeLock(accountId?: string): Promise<boolean> {
-  if (!native()) return true;
+  if (!native()) return false;
   const config = await getNativeLockConfig(accountId);
   if (!config.appLock || !config.biometricEnabled) return false;
 
