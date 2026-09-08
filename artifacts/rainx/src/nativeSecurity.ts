@@ -20,11 +20,8 @@ const LEGACY_KEYS = {
 function keySet(accountId?: string) {
   const scope = accountId ? accountId.replace(/[^a-zA-Z0-9_-]/g, "_") : "device";
   return {
-    pinHash: `${PREFIX}${scope}_pin_hash`,
-    pinEnabled: `${PREFIX}${scope}_pin_enabled`,
     appLock: `${PREFIX}${scope}_app_lock`,
     biometric: `${PREFIX}${scope}_biometric_enabled`,
-    pinLength: `${PREFIX}${scope}_pin_length`,
   };
 }
 
@@ -114,171 +111,108 @@ async function getBackendSecurityPrefs(accountId?: string) {
   } catch { return {}; }
 }
 
-async function migratePinStorage(accountId?: string) {
-  if (!native() || !accountId) return;
-  const accountKeys = keySet(accountId);
-  const deviceKeys = keySet();
-
-  const accountValues = await Promise.all([
-    secureGet(accountKeys.pinHash), secureGet(accountKeys.pinEnabled),
-    secureGet(accountKeys.appLock), secureGet(accountKeys.biometric), secureGet(accountKeys.pinLength),
+async function removeLegacyPinArtifacts(accountId?: string) {
+  if (!native()) return;
+  const scope = accountId ? accountId.replace(/[^a-zA-Z0-9_-]/g, "_") : "device";
+  const keys = new Set([
+    LEGACY_KEYS.pinHash, LEGACY_KEYS.pinEnabled, LEGACY_KEYS.pinLength,
+    `${PREFIX}${scope}_pin_hash`,
+    `${PREFIX}${scope}_pin_enabled`,
+    `${PREFIX}${scope}_pin_length`,
+    `${PREFIX}device_pin_hash`,
+    `${PREFIX}device_pin_enabled`,
+    `${PREFIX}device_pin_length`,
   ]);
-  const legacyValues = await Promise.all([
-    secureGet(LEGACY_KEYS.pinHash), secureGet(LEGACY_KEYS.pinEnabled),
-    secureGet(LEGACY_KEYS.appLock), secureGet(LEGACY_KEYS.biometric), secureGet(LEGACY_KEYS.pinLength),
-  ]);
-  const deviceValues = await Promise.all([
-    secureGet(deviceKeys.pinHash), secureGet(deviceKeys.pinEnabled),
-    secureGet(deviceKeys.appLock), secureGet(deviceKeys.biometric), secureGet(deviceKeys.pinLength),
-  ]);
+  await Promise.all([...keys].map(secureRemove));
+}
 
-  const merged = accountValues.map((value, index) => {
-    if (value !== null) return value;
-    if (deviceValues[index] !== null) return deviceValues[index];
-    if (legacyValues[index] !== null) return legacyValues[index];
-    return null;
-  });
-
-  if (!merged.some((value) => value !== null)) return;
-
-  const accountKeyList = Object.values(accountKeys);
-  await Promise.all(accountKeyList.map((key, index) =>
-    merged[index] === null ? Promise.resolve() : secureSet(key, merged[index] as string)
-  ));
-
-  // One-time migration only. Old locations are removed after the account copy
-  // succeeds so an old PIN cannot silently compete with the current PIN.
-  await Promise.all([
-    ...Object.values(deviceKeys).map(secureRemove),
-    ...Object.values(LEGACY_KEYS).map(secureRemove),
-  ]);
+async function getBackendPinStatus(accountId?: string) {
+  if (!accountId) return { pin_exists: false, pin_length: null, locked_until: null };
+  try {
+    const { data, error } = await supabase.rpc("get_my_pin_status");
+    if (error || !data || typeof data !== "object") return { pin_exists: false, pin_length: null, locked_until: null };
+    return data;
+  } catch { return { pin_exists: false, pin_length: null, locked_until: null }; }
 }
 
 export async function getNativeLockConfig(accountId?: string): Promise<NativeLockConfig> {
+  const resolved = await resolveAccountId(accountId);
+  const [backend, pinStatus] = await Promise.all([
+    getBackendSecurityPrefs(resolved),
+    getBackendPinStatus(resolved),
+  ]);
+  const pinEnabled = pinStatus.pin_exists === true;
+  const backendBiometric = backend.biometricEnabled === true;
+  const pinRegistrationRequired = !pinEnabled && (
+    backend.pinEnabled === true || backendBiometric || backend.appLock === true
+  );
+
   if (!native()) {
-    const prefs = getBrowserSecurityPrefs();
-    const hasStoredPin = typeof prefs.pinHash === "string" && prefs.pinHash.length > 0;
-    const pinEnabled = prefs.pinEnabled === true && hasStoredPin;
-    const biometricEnabled = prefs.biometricEnabled === true;
-    const backend = hasStoredPin ? {} : await getBackendSecurityPrefs(accountId);
-    const pinRegistrationRequired = !hasStoredPin && (
-      backend.pinEnabled === true || backend.biometricEnabled === true || backend.appLock === true
-    );
     return {
       pinEnabled,
-      appLock: (prefs.appLock === true && (pinEnabled || biometricEnabled)) || pinRegistrationRequired,
-      biometricEnabled,
-      pinLength: Math.max(4, Math.min(6, Number(prefs.pinLength) || 4)),
-      pinLengthKnown: true,
+      appLock: pinEnabled || backend.appLock === true || backendBiometric,
+      biometricEnabled: backendBiometric,
+      pinLength: Math.max(4, Math.min(6, Number(pinStatus.pin_length) || 4)),
+      pinLengthKnown: Number(pinStatus.pin_length) >= 4 && Number(pinStatus.pin_length) <= 6,
       pinRegistrationRequired,
-      biometricRegistrationRequired: pinRegistrationRequired && backend.biometricEnabled === true,
+      biometricRegistrationRequired: false,
     };
   }
 
-  const resolved = await resolveAccountId(accountId);
-  await migratePinStorage(resolved);
+  await removeLegacyPinArtifacts(resolved);
   const keys = keySet(resolved);
-
-  const [pinEnabled, appLock, biometricEnabled, pinLength, pinHash] = await Promise.all([
-    secureGet(keys.pinEnabled), secureGet(keys.appLock), secureGet(keys.biometric),
-    secureGet(keys.pinLength), secureGet(keys.pinHash),
+  const [localAppLock, localBiometric] = await Promise.all([
+    secureGet(keys.appLock), secureGet(keys.biometric),
   ]);
-
-  const parsedLength = Number(pinLength);
-  const pinLengthKnown = parsedLength >= 4 && parsedLength <= 6;
-  const normalizedLength = pinLengthKnown ? parsedLength : 4;
-  const hasStoredPin = !!pinHash;
-  const recoveredPinEnabled = pinEnabled === "1" || hasStoredPin;
-  const recoveredBiometric = biometricEnabled === "1";
-
-  // Never report a lock as enabled if there is no usable PIN and no biometric.
-  // This prevents an orphaned appLock flag from producing an unlock screen
-  // that can never accept credentials.
-  const recoveredAppLock =
-    appLock === "1" && (recoveredPinEnabled || recoveredBiometric);
-  const hasLocalConfig = [pinEnabled, appLock, biometricEnabled, pinLength, pinHash].some(value => value !== null);
-  const backend = hasLocalConfig ? {} : await getBackendSecurityPrefs(resolved);
-  const pinRegistrationRequired = !hasStoredPin && (
-    backend.pinEnabled === true || backend.biometricEnabled === true || backend.appLock === true
-  );
+  const biometricEnabled = localBiometric === "1";
+  const pinLength = Number(pinStatus.pin_length) || 4;
 
   return {
-    pinEnabled: recoveredPinEnabled,
-    appLock: recoveredAppLock || pinRegistrationRequired,
-    biometricEnabled: recoveredBiometric,
-    pinLength: normalizedLength,
-    pinLengthKnown,
+    pinEnabled,
+    appLock: pinEnabled || localAppLock === "1" || backend.appLock === true || biometricEnabled,
+    biometricEnabled,
+    pinLength: Math.max(4, Math.min(6, pinLength)),
+    pinLengthKnown: pinLength >= 4 && pinLength <= 6,
     pinRegistrationRequired,
-    biometricRegistrationRequired: pinRegistrationRequired && backend.biometricEnabled === true,
+    biometricRegistrationRequired: pinEnabled && backendBiometric && !biometricEnabled,
   };
 }
 
 export async function saveNativePin(pin: string, accountId?: string) {
-  if (!/^\d{4,6}$/.test(pin)) throw new Error("PIN must contain 4–6 digits.");
+  if (!/^[0-9]{4,6}$/.test(pin)) throw new Error("PIN must contain 4–6 digits.");
   const resolved = await resolveAccountId(accountId);
   if (!resolved) throw new Error("Your account session is not ready.");
-
-  if (!native()) {
-    saveBrowserSecurityPrefs({ pinHash: await sha256(pin), pinLength: pin.length, pinEnabled: true, appLock: true });
-    emitConfigChanged();
-    return;
-  }
-
-  const keys = keySet(resolved);
-  await secureSet(keys.pinHash, await sha256(pin));
-  await secureSet(keys.pinLength, String(pin.length));
-  await secureSet(keys.pinEnabled, "1");
-  await secureSet(keys.appLock, "1");
+  const { error } = await supabase.rpc("set_my_pin", { p_pin: pin });
+  if (error) throw new Error(error.message || "Unable to save PIN securely.");
+  await removeLegacyPinArtifacts(resolved);
   emitConfigChanged();
 }
 
-async function findMatchingPinKey(pin: string, accountId?: string) {
-  const hash = await sha256(pin);
-  const resolved = await resolveAccountId(accountId);
-  const candidates = [keySet(resolved), keySet(accountId), keySet(), LEGACY_KEYS];
-  const seen = new Set<string>();
-
-  for (const keys of candidates) {
-    if (seen.has(keys.pinHash)) continue;
-    seen.add(keys.pinHash);
-    const stored = await secureGet(keys.pinHash);
-    if (stored && stored === hash) return keys;
-  }
-  return null;
-}
-
 export async function verifyNativePin(pin: string, accountId?: string): Promise<boolean> {
-  if (!/^\d{4,6}$/.test(pin)) return false;
-  if (!native()) return getBrowserSecurityPrefs().pinHash === await sha256(pin);
-  await getNativeLockConfig(accountId);
-  return !!(await findMatchingPinKey(pin, accountId));
+  if (!/^[0-9]{4,6}$/.test(pin)) return false;
+  const resolved = await resolveAccountId(accountId);
+  if (!resolved) return false;
+  try {
+    const { data, error } = await supabase.rpc("verify_my_pin", { p_pin: pin });
+    return !error && data?.success === true;
+  } catch { return false; }
 }
 
 export async function disableNativePin(first: string, second?: string) {
-  if (!native()) throw new Error("PIN lock is available in the native app only.");
-
-  // Compatibility with both disableNativePin(pin, accountId) and the older
-  // disableNativePin(accountId, pin) call signature.
   let pin = first;
   let accountId = second;
-  if (!/^\d{4,6}$/.test(first) && /^\d{4,6}$/.test(second || "")) {
+  if (!/^[0-9]{4,6}$/.test(first) && /^[0-9]{4,6}$/.test(second || "")) {
     accountId = first;
     pin = second as string;
   }
-  if (!/^\d{4,6}$/.test(pin)) throw new Error("Enter your current PIN.");
-
-  const matching = await findMatchingPinKey(pin, accountId);
-  if (!matching) throw new Error("Incorrect PIN.");
-
+  if (!/^[0-9]{4,6}$/.test(pin)) throw new Error("Enter your current PIN.");
   const resolved = await resolveAccountId(accountId);
-  const all = [keySet(resolved), keySet(accountId), keySet(), LEGACY_KEYS];
-  const unique = new Map(all.map((keys) => [keys.pinHash, keys]));
-
-  await Promise.all([...unique.values()].flatMap((keys) => [
-    secureRemove(keys.pinHash), secureRemove(keys.pinLength),
-    secureRemove(keys.pinEnabled), secureRemove(keys.appLock), secureRemove(keys.biometric),
-  ]));
-
+  if (!resolved) throw new Error("Your account session is not ready.");
+  const { data, error } = await supabase.rpc("delete_my_pin", { p_pin: pin });
+  if (error) throw new Error(error.message || "Unable to remove PIN.");
+  if (data?.locked_until) throw new Error("Too many incorrect PIN attempts. Try again later.");
+  if (data?.deleted !== true) throw new Error("Incorrect PIN.");
+  await removeLegacyPinArtifacts(resolved);
   clearNativeSessionUnlock();
   emitConfigChanged();
 }
