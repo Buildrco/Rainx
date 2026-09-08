@@ -433,7 +433,8 @@ function CreateCoin({ onBack, onCreated }) {
       let image_url = null;
       if (logo) {
         const ext = (logo.name.split(".").pop() || "jpg").toLowerCase();
-        const objectPath = `${user.id}/${crypto.randomUUID()}.${ext}`;
+        const fileId = globalThis.crypto?.randomUUID?.() || Date.now() + "-" + Math.random().toString(36).slice(2);
+        const objectPath = user.id + "/" + fileId + "." + ext;
         const upload = await supabase.storage.from("space-coin-logos").upload(objectPath, logo, { contentType: logo.type || "image/jpeg", upsert: false });
         if (upload.error) throw upload.error;
         image_url = supabase.storage.from("space-coin-logos").getPublicUrl(objectPath).data.publicUrl;
@@ -540,6 +541,7 @@ function CreateCoin({ onBack, onCreated }) {
               }}>
                 <input
                   ref={logoInputRef}
+                  onClick={(event) => event.stopPropagation()}
                   type="file"
                   accept="image/*"
                   onChange={(e) => {
@@ -1418,7 +1420,7 @@ const createStyles = `
   display:flex;flex-direction:column;align-items:center;
   justify-content:center;background:#FAFAFA;cursor:pointer
 }
-.rx-upload input{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;cursor:pointer}
+.rx-upload input{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;cursor:pointer;pointer-events:none}
 .rx-upload-circle{
   width:72px;height:72px;border-radius:50%;display:grid;
   place-items:center;background:#FFF7DA;color:#D7A21A;
