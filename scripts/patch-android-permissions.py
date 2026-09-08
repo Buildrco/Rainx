@@ -195,3 +195,45 @@ import androidx.core.content.ContextCompat;
 
 
 patch_webview_media_permissions()
+
+
+
+def patch_native_bottom_sheet():
+    """Install the Material BottomSheet plugin into regenerated Capacitor Android projects."""
+    source = Path("../../scripts/native/android/RainxBottomSheetPlugin.java").resolve()
+    target = Path("android/app/src/main/java/com/rainx/app/RainxBottomSheetPlugin.java")
+    if not source.exists():
+        raise SystemExit(f"Native bottom-sheet source not found: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source.read_text())
+
+    gradle = Path("android/app/build.gradle")
+    gradle_text = gradle.read_text()
+    dependency = "implementation 'com.google.android.material:material:1.12.0'"
+    if dependency not in gradle_text:
+        gradle.write_text(gradle_text.replace("dependencies {", "dependencies {\n    " + dependency, 1))
+
+    activity_files = list(Path("android/app/src/main").rglob("MainActivity.java"))
+    if not activity_files:
+        raise SystemExit("MainActivity.java not found for native bottom-sheet registration")
+    activity = activity_files[0]
+    activity_text = activity.read_text()
+    if "RainxBottomSheetPlugin" not in activity_text:
+        activity_text = activity_text.replace(
+            "import com.getcapacitor.BridgeActivity;",
+            "import com.getcapacitor.BridgeActivity;\nimport com.rainx.app.RainxBottomSheetPlugin;",
+            1,
+        )
+        marker = "super.onCreate(savedInstanceState);"
+        if marker not in activity_text:
+            raise SystemExit("Could not find MainActivity.onCreate registration point")
+        activity_text = activity_text.replace(
+            marker,
+            marker + "\n        registerPlugin(RainxBottomSheetPlugin.class);",
+            1,
+        )
+        activity.write_text(activity_text)
+    print("Native Material bottom-sheet plugin installed")
+
+
+patch_native_bottom_sheet()
