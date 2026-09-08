@@ -71,9 +71,11 @@ export default function LightweightChart({
   const ohlcRangeRef  = useRef(null); // { min, max } of visible candle data — keeps scale pinned to OHLC
   const priceZoomRef  = useRef(1);    // 1 = fit-to-data; <1 = zoomed in; >1 = zoomed out (touch price-axis drag)
   const loadMoreRef   = useRef(onLoadMore);
+  const tradeMarkerClickRef = useRef(onTradeMarkerClick);
   const loadingMoreRef = useRef(false);
 
   useEffect(() => { loadMoreRef.current = onLoadMore; }, [onLoadMore]);
+  useEffect(() => { tradeMarkerClickRef.current = onTradeMarkerClick; }, [onTradeMarkerClick]);
 
   // ── Create chart once on mount ───────────────────────────────────────────
   useEffect(() => {
@@ -93,7 +95,7 @@ export default function LightweightChart({
       layout: {
         background: { color: bgColor },
         textColor,
-        fontFamily: "'Montserrat', sans-serif",
+        fontFamily: "-apple-system,BlinkMacSystemFont,\"SF Pro Text\",Arial,sans-serif",
         fontSize: 10,
         attributionLogo: false,
       },
@@ -134,15 +136,6 @@ export default function LightweightChart({
       priceLineVisible: false,
       lastValueVisible: true,
       crosshairMarkerVisible: true,
-      autoscaleInfoProvider: () => {
-        const r = ohlcRangeRef.current;
-        if (!r) return null;
-        const zoom = priceZoomRef.current || 1;
-        const center = (r.max + r.min) / 2;
-        const halfSpan = ((r.max - r.min) / 2 || r.max * 0.005) * zoom;
-        const pad = halfSpan * 0.12;
-        return { priceRange: { minValue: center - halfSpan - pad, maxValue: center + halfSpan + pad }, margins: { above: 0.08, below: 0.08 } };
-      },
     }) : chart.addCandlestickSeries({
       upColor:         BULL_COLOR,
       downColor:       BEAR_COLOR,
@@ -150,20 +143,6 @@ export default function LightweightChart({
       borderDownColor: BEAR_COLOR,
       wickUpColor:     BULL_COLOR,
       wickDownColor:   WICK_BEAR,
-      // Pin auto-scale to candle OHLC range — prevents SL/TP price lines from
-      // forcing the chart to zoom out and compress the candles.
-      autoscaleInfoProvider: () => {
-        const r = ohlcRangeRef.current;
-        if (!r) return null;
-        const zoom = priceZoomRef.current || 1;
-        const center = (r.max + r.min) / 2;
-        const halfSpan = ((r.max - r.min) / 2 || r.max * 0.005) * zoom;
-        const pad = halfSpan * 0.12;
-        return {
-          priceRange: { minValue: center - halfSpan - pad, maxValue: center + halfSpan + pad },
-          margins: { above: 0.08, below: 0.08 },
-        };
-      },
     });
 
     chartRef.current  = chart;
@@ -214,7 +193,7 @@ export default function LightweightChart({
 
     const clickHandler = (param) => {
       const id = param?.hoveredObjectId;
-      if (id && onTradeMarkerClick) onTradeMarkerClick(id);
+      if (id && tradeMarkerClickRef.current) tradeMarkerClickRef.current(id);
     };
     chart.subscribeClick(clickHandler);
 
@@ -229,7 +208,7 @@ export default function LightweightChart({
       prevBarsRef.current  = []; // reset so next mount does full setData
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [compact, isDark, bgColorProp, chartType, onTradeMarkerClick]);
+  }, [compact, isDark, bgColorProp, chartType]);
 
   // ── Update candle data — smart: use update() for live ticks, setData() for full reloads
   useEffect(() => {
@@ -298,7 +277,7 @@ export default function LightweightChart({
             const first = bars[Math.max(0, bars.length - 40)].time;
             chartRef.current.timeScale().setVisibleRange({ from: first, to: last });
           } else {
-            chartRef.current.timeScale().scrollToRealTime();
+            chartRef.current.timeScale().fitContent();
           }
         }
       }

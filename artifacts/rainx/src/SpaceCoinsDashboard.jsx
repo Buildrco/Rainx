@@ -443,7 +443,6 @@ function CreateCoin({ onBack, onCreated }) {
           </header>
 
           <section className="rx-create-stage" aria-hidden="true">
-            <div className="rx-create-glow" />
 
             <video
               className="rx-cloud-video"
@@ -508,7 +507,7 @@ function CreateCoin({ onBack, onCreated }) {
 
           {step === 1 && (
             <>
-              <label className="rx-upload">
+              <div className="rx-upload">
                 <input
                   ref={logoInputRef}
                   type="file"
@@ -535,7 +534,8 @@ function CreateCoin({ onBack, onCreated }) {
 
                 <strong>Upload Coin Logo</strong>
                 <small>PNG or JPG · Max 5MB</small>
-              </label>
+                <button type="button" className="rx-upload-hit" onClick={() => logoInputRef.current?.click()} aria-label="Upload Coin Logo" />
+              </div>
 
               <div className="rx-fields">
                 <Field
@@ -1023,7 +1023,7 @@ function ClosedOrders({ market, userId }) {
     let active = true;
     supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at").eq("coin_id", market.id).eq("status", "closed").eq("user_id", userId || "00000000-0000-0000-0000-000000000000").order("created_at", { ascending: false }).limit(50).then(({ data }) => { if (active) setRows(data || []); });
     return () => { active = false; };
-  }, [market.id]);
+  }, [market.id, userId]);
   if (!rows.length) return <div className="rx-empty-orders"><strong>No closed orders</strong><span>Closed trades will appear here</span></div>;
   return <div className="rx-closed-list">{rows.map((r) => <div key={r.id}><div><strong>{market.symbol}</strong><span className={r.side === "buy" ? "rx-buy-text" : "rx-sell-text"}>{r.side === "buy" ? "Buy" : "Sell"} {Number(r.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} at {formatCoinPrice(r.price)}</span></div><time>{new Date(r.created_at).toLocaleString()}</time></div>)}</div>;
 }
@@ -1086,6 +1086,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     const loadAccount = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.id || !market?.id) return;
+      setUserId(user.id);
       const accountKey = `demo:${user.id}`;
       const { data } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).maybeSingle();
       if (active) setAccount(data || null);
@@ -1621,9 +1622,11 @@ const createStyles = `
 .rx-upload{
   position:relative;border:1px dashed #D8DADC;border-radius:15px;padding:16px;
   display:flex;flex-direction:column;align-items:center;
-  justify-content:center;background:#FAFAFA;cursor:pointer
+  justify-content:center;background:#FAFAFA;cursor:pointer;overflow:hidden
 }
-.rx-upload input{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;cursor:pointer;pointer-events:auto}
+.rx-upload input{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:0;cursor:pointer;pointer-events:none}
+.rx-upload-hit{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;cursor:pointer;padding:0;z-index:2}
+.rx-upload>*:not(.rx-upload-hit){position:relative;z-index:1;pointer-events:none}
 .rx-upload-circle{
   width:72px;height:72px;border-radius:50%;display:grid;
   place-items:center;background:#FFF7DA;color:#D7A21A;
