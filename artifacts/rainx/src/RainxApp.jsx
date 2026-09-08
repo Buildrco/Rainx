@@ -14,6 +14,8 @@ import { Capacitor } from "@capacitor/core";
 import {
   getNativeLockConfig,
   saveNativePin,
+  verifyNativePin,
+  disableNativePin,
   setNativeAppLock,
   setNativeBiometricEnabled,
 } from "./nativeSecurity";
