@@ -4,6 +4,7 @@ import LightweightChart from "./LightweightChart";
 import FullChartView from "./FullChartView";
 import SpaceNewsSection from "./SpaceNewsSection";
 import { resolveMarketLogo } from "./MarketLogos";
+import { useNativeBottomSheet } from "./nativeBottomSheet";
 import { supabase } from "./supabaseClient";
 import {
   T, FONT_HEAD, FONT_BODY,
@@ -368,62 +369,6 @@ function MarketSparkline({ data = [], base = 1, width = 92, height = 32 }) {
   );
 }
 
-// Native-feeling interactive sheet behavior. Dragging is intentionally limited to the
-// handle so the market list keeps its normal vertical scrolling behavior.
-function useBottomSheet(onClose) {
-  const restOffset = 0;
-  const [offset, setOffset] = useState(() => (typeof window !== "undefined" ? window.innerHeight : 800));
-  const [dragging, setDragging] = useState(false);
-  const dragRef = useRef(null);
-
-  useEffect(() => {
-    const frame = requestAnimationFrame(() => setOffset(restOffset));
-    return () => cancelAnimationFrame(frame);
-  }, [restOffset]);
-
-  const finish = (clientY, time) => {
-    const start = dragRef.current;
-    if (!start) return;
-    const elapsed = Math.max(1, time - start.lastTime);
-    const velocity = (clientY - start.lastY) / elapsed;
-    const current = start.offset + (clientY - start.startY);
-    setDragging(false);
-    dragRef.current = null;
-
-    if (current > restOffset + 120 || velocity > 0.85) {
-      setOffset(window.innerHeight);
-      window.setTimeout(onClose, 260);
-    } else if (current < restOffset * 0.45 || velocity < -0.6) {
-      setOffset(0);
-    } else {
-      setOffset(restOffset);
-    }
-  };
-
-  const bind = {
-    onPointerDown: (event) => {
-      if (!event.target.closest?.("[data-sheet-handle]")) return;
-      event.currentTarget.setPointerCapture?.(event.pointerId);
-      dragRef.current = { startY: event.clientY, lastY: event.clientY, lastTime: performance.now(), offset };
-      setDragging(true);
-    },
-    onPointerMove: (event) => {
-      const start = dragRef.current;
-      if (!start) return;
-      const now = performance.now();
-      const next = Math.max(0, Math.min(window.innerHeight, start.offset + event.clientY - start.startY));
-      start.lastY = event.clientY;
-      start.lastTime = now;
-      setOffset(next);
-      event.preventDefault();
-    },
-    onPointerUp: (event) => finish(event.clientY, performance.now()),
-    onPointerCancel: (event) => finish(event.clientY, performance.now()),
-  };
-
-  return { bind, style: { transform: `translate3d(0, ${offset}px, 0)`, willChange: "transform", transition: dragging ? "none" : "transform 520ms cubic-bezier(0.22, 0.8, 0.2, 1)" } };
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Add Market bottom sheet — supports add, replace when full, and manage active
 // ─────────────────────────────────────────────────────────────────────────────
@@ -433,13 +378,15 @@ function AddMarketSheet({ onClose, onSelect, onReplaceMarket, initialReplacement
   const [mode, setMode] = useState(null);
   const [managedAsset, setManagedAsset] = useState(null);   // asset being managed or new asset wanting a slot
   const atLimit = activeMarkets.length >= maxActiveMarkets;
-  const sheet = useBottomSheet(onClose);
+  const sheetRef = useRef(null);
+  const nativeSheetOpen = useNativeBottomSheet(sheetRef, true);
+  const sheet = { bind: { ref: sheetRef }, style: nativeSheetOpen ? { visibility: "hidden", pointerEvents: "none" } : {} };
   useEffect(() => { if (initialReplacementAsset) { setManagedAsset(initialReplacementAsset); setMode("pick_category_for_replace"); } }, [initialReplacementAsset]);
 
   // ── Manage already-active market: Replace or Delete ─────────────────────
   if (mode === "manage" && managedAsset) {
     return (
-      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:1000, display:"flex", alignItems:"flex-end", overflow:"hidden" }} onClick={onClose}>
+      <div style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(0,0,0,0.55)", zIndex:1000, display:"flex", alignItems:"flex-end", overflow:"hidden" }} onClick={onClose}>
         <div onClick={e => e.stopPropagation()} {...sheet.bind} style={{ ...sheet.style, background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 40px", height:"min(96dvh, 820px)", maxHeight:"96dvh", overflowY:"scroll", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"none", touchAction:"pan-y" }}>
           <div style={{ display:"flex", justifyContent:"center", padding:"12px 0 8px" }}><div data-sheet-handle style={{ width:36, height:4, borderRadius:2, background:T.cardBorder, touchAction:"none" }} /></div>
           <div style={{ padding:"0 20px 20px" }}>
