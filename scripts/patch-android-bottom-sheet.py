@@ -1,0 +1,41 @@
+from pathlib import Path
+
+
+ROOT = Path.cwd()
+ANDROID = ROOT / "android"
+PLUGIN_SOURCE = (ROOT / "../../scripts/native/android/RainxBottomSheetPlugin.java").resolve()
+PLUGIN_TARGET = ANDROID / "app/src/main/java/com/rainx/app/RainxBottomSheetPlugin.java"
+
+if not ANDROID.exists():
+    raise SystemExit("Capacitor Android project is missing")
+
+PLUGIN_TARGET.parent.mkdir(parents=True, exist_ok=True)
+PLUGIN_TARGET.write_text(PLUGIN_SOURCE.read_text(), encoding="utf-8")
+
+app_gradle = ANDROID / "app/build.gradle"
+gradle_text = app_gradle.read_text(encoding="utf-8")
+material_dependency = "implementation 'com.google.android.material:material:1.12.0'"
+if material_dependency not in gradle_text:
+    gradle_text = gradle_text.replace("dependencies {", "dependencies {\n    " + material_dependency, 1)
+    app_gradle.write_text(gradle_text, encoding="utf-8")
+
+activities = list((ANDROID / "app/src/main/java").rglob("MainActivity.java"))
+if not activities:
+    raise SystemExit("Capacitor MainActivity.java was not generated")
+
+activity = activities[0]
+activity_text = activity.read_text(encoding="utf-8")
+if "RainxBottomSheetPlugin" not in activity_text:
+    activity_text = activity_text.replace(
+        "import com.getcapacitor.BridgeActivity;",
+        "import android.os.Bundle;\nimport com.getcapacitor.BridgeActivity;\nimport com.rainx.app.RainxBottomSheetPlugin;",
+        1,
+    )
+    activity_text = activity_text.replace(
+        "public class MainActivity extends BridgeActivity {",
+        "public class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(Bundle savedInstanceState) {\n        super.onCreate(savedInstanceState);\n        registerPlugin(RainxBottomSheetPlugin.class);\n    }",
+        1,
+    )
+    activity.write_text(activity_text, encoding="utf-8")
+
+print("Native RainX bottom-sheet plugin installed")
