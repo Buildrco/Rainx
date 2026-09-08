@@ -174,18 +174,24 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
       setError(`Enter your ${config.pinLength || 4}-digit PIN.`);
       return;
     }
-    const ok = await verifyNativePin(value, account?.id);
-    if (ok) {
-      markNativeSessionUnlocked(account?.id);
-      setLocked(false);
+    try {
+      const ok = await verifyNativePin(value, account?.id);
+      if (ok) {
+        markNativeSessionUnlocked(account?.id);
+        setLocked(false);
+        setPin("");
+        setError("");
+        emitLockState(false);
+        return;
+      }
+      hapticTap();
       setPin("");
-      setError("");
-      emitLockState(false);
-      return;
+      setError("Incorrect PIN. Try again.");
+    } catch (verificationError) {
+      hapticTap();
+      setPin("");
+      setError(verificationError?.message || "PIN verification is temporarily unavailable.");
     }
-    hapticTap();
-    setPin("");
-    setError("Incorrect PIN. Try again.");
   };
 
   const addDigit = (digit) => {
@@ -232,7 +238,7 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
             <button type="button" onClick={registerDevicePin} disabled={registrationSaving} style={{width:"100%",marginTop:16,border:0,borderRadius:12,padding:"14px 0",background:"#11100D",color:"#F4D35E",fontFamily:FONT,fontWeight:900,fontSize:13,cursor:"pointer",opacity:registrationSaving?.65:1}}>{registrationSaving?"SECURING DEVICE…":"SAVE PIN & CONTINUE"}</button>
           </div>
           <div style={{marginTop:16,color:"#737B85",fontSize:11,textAlign:"center",lineHeight:1.45,maxWidth:330}}>
-            Your PIN stays in secure device storage. It is never uploaded to RainX.
+            Your PIN is protected by Supabase Auth and is never returned to this app.
           </div>
         </div>
       </div>
