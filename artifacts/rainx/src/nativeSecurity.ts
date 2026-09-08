@@ -136,7 +136,10 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
   if (!native()) {
     return {
       pinEnabled,
-      appLock: pinEnabled || backend.appLock === true || backendBiometric,
+      // A PIN or biometric credential can exist without App Lock being active.
+      // App Lock is the explicit account/device preference, not a side effect
+      // of having a PIN configured.
+      appLock: backend.appLock === true,
       // A biometric flag is never active until a server-side PIN exists.
       biometricEnabled: pinEnabled && backendBiometric,
       pinLength: Math.max(4, Math.min(6, Number(pinStatus.pin_length) || 4)),
@@ -160,7 +163,9 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
 
   return {
     pinEnabled,
-    appLock: pinEnabled || localAppLock === "1" || backend.appLock === true || biometricEnabled,
+    // Keep PIN and biometric setup independent from the App Lock switch.
+    // Turning App Lock off must remain off after a cold start.
+    appLock: localAppLock === "1" || backend.appLock === true,
     biometricEnabled,
     pinLength: Math.max(4, Math.min(6, pinLength)),
     pinLengthKnown: pinLength >= 4 && pinLength <= 6,
