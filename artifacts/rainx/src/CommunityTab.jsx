@@ -11,6 +11,7 @@ import {
   UserPlus, UserCheck, ArrowLeft, Bell, MoreHorizontal, Plus, Hash, AtSign, Flag, ChevronRight, ChevronDown, MessageSquare, Search, Bookmark, Share2,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
+import { useNativeBottomSheet } from "./nativeBottomSheet";
 
 const T = {
   ink: "#0F0E0B", card: "#1C1913", cardBorder: "#332C1F",
@@ -30,7 +31,6 @@ const engAsh = () => (T.ink && T.ink.toUpperCase() === "#FFFFFF") ? "#536471" : 
 
 const pulse = "@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.4; } }";
 const slideIn = "@keyframes slideInPanel { from { transform: translateX(100%); } to { transform: translateX(0); } }";
-const slideUp = "@keyframes slideUpSheet { from { transform: translateY(100%); } to { transform: translateY(0); } }";
 
 function timeAgo(dateStr) {
   const diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
@@ -577,6 +577,8 @@ function LocationPicker({ onClose, onSelect, currentLabel }) {
 function Composer({ account, onPosted, onClose, compact, themeTokens }) {
   if (themeTokens) Object.assign(T, themeTokens);
   const asModal = !!onClose;
+  const nativeSheetRef = useRef(null);
+  const nativeSheetOpen = useNativeBottomSheet(nativeSheetRef, asModal);
 
   const [text, setText] = useState("");
   const [posting, setPosting] = useState(false);
@@ -703,16 +705,15 @@ function Composer({ account, onPosted, onClose, compact, themeTokens }) {
   if (asModal) {
     return (
       <>
-        <style>{`${slideUp}`}</style>
-        <div style={{ position: "fixed", inset: 0, zIndex: 500, background: "rgba(0,0,0,0.55)" }} onClick={onClose}>
-          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", height: "92dvh", background: T.ink, borderRadius: "20px 20px 0 0", display: "flex", flexDirection: "column", animation: "slideUpSheet 0.34s cubic-bezier(0.32,0.72,0,1)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ position: "fixed", inset: 0, zIndex: 500, background: nativeSheetOpen ? "transparent" : "rgba(0,0,0,0.55)" }} onClick={onClose}>
+          <div ref={nativeSheetRef} style={{ position: "absolute", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", height: "92dvh", background: T.ink, borderRadius: "20px 20px 0 0", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
             {/* drag handle */}
             <div style={{ flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 10 }}>
               <div style={{ width: 36, height: 4, borderRadius: 2, background: T.cardBorder }} />
             </div>
             {/* header */}
             <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px 12px", borderBottom: `1px solid ${T.cardBorder}` }}>
-              <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, color: T.paper }}>
+              <button data-rainx-native-close onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", padding: 6, color: T.paper }}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
               <button onClick={submit} disabled={!canPost} style={{ background: T.goldGradient, color: T.ink, border: "none", borderRadius: 20, padding: "9px 24px", fontWeight: 800, fontSize: 14, cursor: canPost ? "pointer" : "default", opacity: canPost ? 1 : 0.4, transition: "opacity 0.15s", fontFamily: FONT_HEAD }}>
