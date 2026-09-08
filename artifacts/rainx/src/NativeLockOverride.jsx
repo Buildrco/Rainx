@@ -8,6 +8,8 @@ import {
   getNativeLockConfig,
   hasNativeUnlockedSession,
   markNativeSessionUnlocked,
+  saveNativePin,
+  setNativeBiometricEnabled,
   verifyNativePin,
 } from "./nativeSecurity";
 
@@ -50,6 +52,10 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   const [biometricRunning, setBiometricRunning] = useState(false);
   const [biometryInfo, setBiometryInfo] = useState(null);
   const [pressedKey, setPressedKey] = useState(null);
+  const [registrationPin, setRegistrationPin] = useState("");
+  const [registrationConfirm, setRegistrationConfirm] = useState("");
+  const [registrationError, setRegistrationError] = useState("");
+  const [registrationSaving, setRegistrationSaving] = useState(false);
   const biometricAttempted = useRef(false);
   const unlockTimer = useRef(null);
 
@@ -136,6 +142,32 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
     emitLockState(false);
   };
 
+  const registerDevicePin = async () => {
+    setRegistrationError("");
+    if (!/^\d{4,6}$/.test(registrationPin)) {
+      setRegistrationError("Enter a 4–6 digit PIN.");
+      return;
+    }
+    if (registrationPin !== registrationConfirm) {
+      setRegistrationError("PINs do not match.");
+      return;
+    }
+    setRegistrationSaving(true);
+    try {
+      await saveNativePin(registrationPin, account?.id);
+      if (config.biometricRegistrationRequired) {
+        try { await setNativeBiometricEnabled(true, account?.id); } catch {}
+      }
+      markNativeSessionUnlocked(account?.id);
+      setRegistrationPin("");
+      setRegistrationConfirm("");
+      setLocked(false);
+      emitLockState(false);
+    } catch (registrationFailure) {
+      setRegistrationError(registrationFailure?.message || "Unable to register this device PIN.");
+    } finally { setRegistrationSaving(false); }
+  };
+
   const unlock = async (value = pin) => {
     setError("");
     if (!/^\d{4,6}$/.test(value)) {
@@ -178,6 +210,34 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   const pinLength = Math.max(4, Math.min(6, Number(config.pinLength) || 4));
   const BioIcon = biometricIcon(biometryInfo);
   const bioAvailable = !!config.biometricEnabled && !!biometryInfo?.isAvailable;
+
+  if (config.pinRegistrationRequired) {
+    return (
+      <div role="dialog" aria-modal="true" aria-label="Register RainX device PIN" style={{
+        position:"fixed", inset:0, zIndex:1000000, background:"linear-gradient(180deg,#FFFFFF 0%,#FFFFFF 62%,#FFE681 100%)",
+        color:"#111418", fontFamily:FONT,
+      }}>
+        <div style={{width:"100%",height:"100%",maxWidth:520,margin:"0 auto",boxSizing:"border-box",padding:"34px 24px 24px",display:"flex",flexDirection:"column",alignItems:"center"}}>
+          <div style={{width:78,height:78,margin:"14px auto 20px",borderRadius:"50%",background:"#050505",border:"3px solid #E9C94B",padding:3,boxSizing:"border-box"}}>
+            <img src={rainxLogoTransparent} alt="RainX" style={{width:"100%",height:"100%",objectFit:"contain",borderRadius:"50%",display:"block"}} />
+          </div>
+          <div style={{fontSize:27,fontWeight:800,letterSpacing:-.8,textAlign:"center"}}>Secure this device</div>
+          <div style={{marginTop:9,color:"#737B85",fontSize:14,lineHeight:1.45,textAlign:"center",maxWidth:340}}>
+            Your RainX account is recognized. Re-register a device PIN to finish signing in after reinstalling the app.
+          </div>
+          <div style={{width:"100%",maxWidth:340,marginTop:28}}>
+            <input value={registrationPin} onChange={event=>setRegistrationPin(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" autoComplete="new-password" placeholder="Create 4–6 digit PIN" aria-label="Create RainX device PIN" style={registrationInputStyle} />
+            <input value={registrationConfirm} onChange={event=>setRegistrationConfirm(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" autoComplete="new-password" placeholder="Confirm device PIN" aria-label="Confirm RainX device PIN" style={{...registrationInputStyle,marginTop:10}} onKeyDown={event=>{if(event.key==="Enter")registerDevicePin()}} />
+            {registrationError && <div style={{color:"#B42318",fontSize:12,fontWeight:700,textAlign:"center",marginTop:10}}>{registrationError}</div>}
+            <button type="button" onClick={registerDevicePin} disabled={registrationSaving} style={{width:"100%",marginTop:16,border:0,borderRadius:12,padding:"14px 0",background:"#11100D",color:"#F4D35E",fontFamily:FONT,fontWeight:900,fontSize:13,cursor:"pointer",opacity:registrationSaving?.65:1}}>{registrationSaving?"SECURING DEVICE…":"SAVE PIN & CONTINUE"}</button>
+          </div>
+          <div style={{marginTop:16,color:"#737B85",fontSize:11,textAlign:"center",lineHeight:1.45,maxWidth:330}}>
+            Your PIN stays in secure device storage. It is never uploaded to RainX.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div role="dialog" aria-modal="true" aria-label="Unlock RainX" style={{
@@ -260,3 +320,4 @@ const keyStyle = {
   transition: "transform 90ms ease, box-shadow 90ms ease", WebkitTapHighlightColor: "transparent",
 };
 const keyPressedStyle = { transform: "scale(.96)", boxShadow: "0 3px 10px rgba(40,45,50,.10)" };
+const registrationInputStyle = { width:"100%", boxSizing:"border-box", border:"1px solid #E6E8EB", borderRadius:12, background:"rgba(255,255,255,.94)", color:"#111418", padding:"13px 14px", fontFamily:FONT, fontSize:16, letterSpacing:3, textAlign:"center", outline:"none" };
