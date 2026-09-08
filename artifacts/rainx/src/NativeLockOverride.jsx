@@ -58,6 +58,7 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   const [registrationSaving, setRegistrationSaving] = useState(false);
   const biometricAttempted = useRef(false);
   const unlockTimer = useRef(null);
+  const unlockInFlight = useRef(false);
 
   const refreshConfig = async () => {
     if (!account?.id) return;
@@ -169,9 +170,12 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
   };
 
   const unlock = async (value = pin) => {
+    if (unlockInFlight.current) return;
+    unlockInFlight.current = true;
     setError("");
     if (!/^\d{4,6}$/.test(value)) {
       setError(`Enter your ${config.pinLength || 4}-digit PIN.`);
+      unlockInFlight.current = false;
       return;
     }
     try {
@@ -182,15 +186,18 @@ export default function NativeLockOverride({ account, initialLocked = false }) {
         setPin("");
         setError("");
         emitLockState(false);
+        unlockInFlight.current = false;
         return;
       }
       hapticTap();
       setPin("");
       setError("Incorrect PIN. Try again.");
+      unlockInFlight.current = false;
     } catch (verificationError) {
       hapticTap();
       setPin("");
       setError(verificationError?.message || "PIN verification is temporarily unavailable.");
+      unlockInFlight.current = false;
     }
   };
 
