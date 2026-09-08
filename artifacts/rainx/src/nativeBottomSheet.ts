@@ -127,7 +127,7 @@ export function useNativeBottomSheet(
         setNativeFieldValue(node, payload.value);
       }
       window.setTimeout(() => {
-        if (active) void NativeBottomSheet.update({ html: serializeSheet(root), baseUrl: window.location.origin + '/' }).catch(() => undefined);
+        if (active && sheetRef.current) void NativeBottomSheet.update({ html: serializeSheet(sheetRef.current), baseUrl: window.location.origin + '/' }).catch(() => undefined);
       }, 40);
     };
 
@@ -135,7 +135,7 @@ export function useNativeBottomSheet(
       if (!active) return;
       active = false;
       restoreWebSheet();
-      const close = root.querySelector<HTMLElement>('[data-rainx-native-close]');
+      const close = (sheetRef.current || root).querySelector<HTMLElement>('[data-rainx-native-close]');
       close?.click();
     };
 
