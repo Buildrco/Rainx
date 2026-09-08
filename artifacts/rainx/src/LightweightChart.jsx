@@ -57,10 +57,14 @@ export default function LightweightChart({
   isDark = false,
   onLoadMore = null,
   bgColor: bgColorProp = null, // override the chart canvas background to match its surrounding card
+  chartType = "candles",
+  tradeMarkers = [],
+  onTradeMarkerClick = null,
 }) {
   const containerRef  = useRef(null);
   const chartRef      = useRef(null);
   const candleRef     = useRef(null);
+  const seriesTypeRef  = useRef(chartType);
   const lineRefs      = useRef([]);   // additional line series for trendlines
   const priceLineMap  = useRef([]);   // { series, priceLine }
   const prevBarsRef   = useRef([]);   // last rendered bars — for smart update() vs setData()
@@ -124,7 +128,22 @@ export default function LightweightChart({
       height: Math.max(el.clientHeight || 0, containerHeight, compact ? 60 : window.innerHeight * 0.22, compact ? 60 : 160),
     });
 
-    const candleSeries = chart.addCandlestickSeries({
+    const candleSeries = chartType === "line" ? chart.addLineSeries({
+      color: BULL_COLOR,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+      autoscaleInfoProvider: () => {
+        const r = ohlcRangeRef.current;
+        if (!r) return null;
+        const zoom = priceZoomRef.current || 1;
+        const center = (r.max + r.min) / 2;
+        const halfSpan = ((r.max - r.min) / 2 || r.max * 0.005) * zoom;
+        const pad = halfSpan * 0.12;
+        return { priceRange: { minValue: center - halfSpan - pad, maxValue: center + halfSpan + pad }, margins: { above: 0.08, below: 0.08 } };
+      },
+    }) : chart.addCandlestickSeries({
       upColor:         BULL_COLOR,
       downColor:       BEAR_COLOR,
       borderUpColor:   BULL_COLOR,
@@ -149,6 +168,7 @@ export default function LightweightChart({
 
     chartRef.current  = chart;
     candleRef.current = candleSeries;
+    seriesTypeRef.current = chartType;
 
     // Keep history loading identical on every chart surface. The consumer
     // owns the API cursor; this renderer only signals when the left edge is
@@ -192,8 +212,15 @@ export default function LightweightChart({
     });
     ro.observe(el);
 
+    const clickHandler = (param) => {
+      const id = param?.hoveredObjectId;
+      if (id && onTradeMarkerClick) onTradeMarkerClick(id);
+    };
+    chart.subscribeClick(clickHandler);
+
     return () => {
       ro.disconnect();
+      try { chart.unsubscribeClick(clickHandler); } catch {}
       chart.remove();
       chartRef.current     = null;
       candleRef.current    = null;
@@ -202,7 +229,7 @@ export default function LightweightChart({
       prevBarsRef.current  = []; // reset so next mount does full setData
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [compact, isDark, bgColorProp]);
+  }, [compact, isDark, bgColorProp, chartType, onTradeMarkerClick]);
 
   // ── Update candle data — smart: use update() for live ticks, setData() for full reloads
   useEffect(() => {
@@ -233,9 +260,9 @@ export default function LightweightChart({
       const prev = prevBarsRef.current;
       const isLiveUpdate =
         prev.length > 0 &&
-        Math.abs(prev.length - bars.length) <= 2 &&          // similar length
-        prev.length >= 2 && bars.length >= 2 &&
-        prev[prev.length - 2]?.time === bars[bars.length - 2]?.time; // penultimate bar unchanged
+        Math.abs(prev.length - bars.length) <= 2 &&
+        prev.length >= 1 && bars.length >= 1 &&
+        (prev.length === 1 || prev[prev.length - 2]?.time === bars[bars.length - 2]?.time);
 
         const previousFirst = prev[0]?.time;
         const previousLast = prev[prev.length - 1]?.time;
@@ -255,10 +282,10 @@ export default function LightweightChart({
           min: Math.min(ohlcRangeRef.current.min, last.low),
           max: Math.max(ohlcRangeRef.current.max, last.high),
         };
-        candleRef.current.update(last);
+        candleRef.current.update(seriesTypeRef.current === "line" ? { time: last.time, value: last.close } : last);
       } else {
         // New instrument or significant data change — full replace
-        candleRef.current.setData(bars);
+        candleRef.current.setData(seriesTypeRef.current === "line" ? bars.map((b) => ({ time: b.time, value: b.close })) : bars);
         if (chartRef.current) {
           if (isPrepend && visibleRange) {
             const added = bars.length - prev.length;
@@ -278,6 +305,24 @@ export default function LightweightChart({
       prevBarsRef.current = bars;
     } catch {}
   }, [candles, compact]);
+
+  // ── Draw executed trade markers directly on the chart ───────────────────
+  useEffect(() => {
+    if (!candleRef.current || !Array.isArray(tradeMarkers)) return;
+    try {
+      const markers = tradeMarkers
+        .filter((m) => Number.isFinite(Number(m.time)) && Number.isFinite(Number(m.price)))
+        .map((m) => ({
+          time: Math.floor(Number(m.time) > 1e12 ? Number(m.time) / 1000 : Number(m.time)),
+          position: m.side === "sell" ? "aboveBar" : "belowBar",
+          color: m.side === "sell" ? "#D94C4C" : "#3E9C76",
+          shape: m.side === "sell" ? "arrowDown" : "arrowUp",
+          text: m.side === "sell" ? "Sell" : "Buy",
+          id: m.id || undefined,
+        }));
+      if (typeof candleRef.current.setMarkers === "function") candleRef.current.setMarkers(markers);
+    } catch {}
+  }, [tradeMarkers, candles]);
 
   // ── Draw AI overlays ─────────────────────────────────────────────────────
   useEffect(() => {
