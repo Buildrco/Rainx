@@ -5618,6 +5618,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   const [securitySessionsLoading, setSecuritySessionsLoading] = useState(false);
   const [loginHistoryRows, setLoginHistoryRows] = useState([]);
   const [loginHistoryLoading, setLoginHistoryLoading] = useState(false);
+  const [recoveryCodes, setRecoveryCodes] = useState([]);
   const [blockedUsers, setBlockedUsers] = useState([]);
   const [mutedUsers, setMutedUsers] = useState([]);
   const [blockedLoading, setBlockedLoading] = useState(false);
@@ -5838,6 +5839,67 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     } catch (error) {
       alert(error?.message || "Unable to update App Lock.");
     }
+  };
+  const requestDataDeletion = async () => {
+    if (!account?.id) return;
+    const { data: pending } = await supabase.from("account_data_deletion_requests")
+      .select("id").eq("user_id", account.id).eq("status", "pending").maybeSingle();
+    if (pending) {
+      alert("A data deletion request is already pending.");
+      return;
+    }
+    const { error } = await supabase.from("account_data_deletion_requests").insert({
+      user_id: account.id,
+      status: "pending",
+      requested_at: new Date().toISOString(),
+    });
+    alert(error ? "Unable to submit the data deletion request." : "Data deletion request submitted.");
+  };
+  const requestAccountDeletion = async () => {
+    if (!account?.id) return;
+    const { data: pending } = await supabase.from("account_deletion_requests")
+      .select("id").eq("user_id", account.id).eq("status", "pending").maybeSingle();
+    if (pending) {
+      alert("An account deletion request is already pending.");
+      setSecuritySheet(null);
+      return;
+    }
+    const { error } = await supabase.from("account_deletion_requests").insert({
+      user_id: account.id,
+      status: "pending",
+      requested_at: new Date().toISOString(),
+      notes: "Requested from RainX Security settings",
+    });
+    setSecuritySheet(null);
+    alert(error ? "Unable to submit the account deletion request." : "Account deletion request submitted for review.");
+  };
+  const reportSecurityIssue = async (reportType) => {
+    if (!account?.id) return;
+    const { error } = await supabase.from("security_reports").insert({
+      user_id: account.id,
+      report_type: reportType,
+      details: "Submitted from RainX Security settings",
+      status: "open",
+    });
+    setSecuritySheet(null);
+    alert(error ? "Unable to submit the security report." : "Security report submitted.");
+  };
+  const generateRecoveryCodes = async () => {
+    if (!account?.id) return;
+    const codes = Array.from({ length: 8 }, () =>
+      `${Math.random().toString(36).slice(2, 6).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+    );
+    const rows = await Promise.all(codes.map(async (code) => ({
+      user_id: account.id,
+      code_hash: await hashPin(code),
+    })));
+    await supabase.from("account_recovery_codes").delete().eq("user_id", account.id).is("used_at", null);
+    const { error } = await supabase.from("account_recovery_codes").insert(rows);
+    if (error) {
+      alert("Unable to generate recovery codes.");
+      return;
+    }
+    setRecoveryCodes(codes);
   };
   useEffect(() => {
     if (morePage !== "profile-menu") setAppearanceOpen(false);
@@ -6883,6 +6945,16 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:18, color:PREF_TEXT, marginBottom:5 }}>{title}</div>
     {desc && <div style={{ fontSize:11.5, color:PREF_MUTED, lineHeight:1.55, marginBottom:16 }}>{desc}</div>}
   </>;
+  const LegalSheet = ({ onClose }) => (
+    <LightSheet onClose={onClose}>
+      <LightSheetTitle title="RainX terms & privacy" desc="Important information about using RainX." />
+      <div style={{ fontSize:11.5, color:PREF_TEXT, lineHeight:1.65 }}>
+        <p><strong>Not financial advice.</strong> RainX provides market analysis and educational commentary only. It does not recommend, execute or guarantee trades.</p>
+        <p><strong>Your responsibility.</strong> Trading carries risk. You are responsible for your decisions, position sizing and risk management.</p>
+        <p><strong>Data.</strong> RainX stores account preferences and security requests to provide these controls. You can request deletion from Privacy & Data.</p>
+      </div>
+    </LightSheet>
+  );
 
   const LightChoice = ({ value, current, title, desc, onSelect }) => (
     <button type="button" onClick={()=>onSelect(value)} style={{ width:"100%", background:"transparent", border:0, padding:"13px 0", display:"flex", alignItems:"center", gap:12, textAlign:"left", cursor:"pointer" }}>
@@ -6912,20 +6984,21 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
           <LightDivider />
           <LightToggleRow icon={Bell} title="Marketing updates" subtitle="Allow optional promotional and creator updates" prefKey="marketingNotifications" defaultValue={false} />
           <LightDivider />
-          <LightRow icon={Download} title="Download your data" subtitle="Export available local preferences now; full account export needs backend support" onPress={()=>setSettingsSheet("downloadData")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+           <LightRow icon={Download} title="Download your data" subtitle="Export available local preferences now; full account export needs backend support" onPress={()=>setSettingsSheet("downloadData")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
         </LightSection>
         <LightSection title="Data lifecycle">
-          <LightRow icon={Database} title="Data deletion request" subtitle="Request deletion of eligible account data" onPress={()=>alert("Backend required: authenticated data-deletion request and retention workflow.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED,border:`1px solid ${PREF_BORDER}`,borderRadius:20,padding:"4px 8px"}}>BACKEND</span>} />
+           <LightRow icon={Database} title="Data deletion request" subtitle="Request deletion of eligible account data" onPress={requestDataDeletion} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           <LightDivider />
           <LightRow icon={Trash2} title="Clear local RainX data" subtitle="Remove locally stored preferences on this device" onPress={()=>{try{Object.keys(localStorage).filter(k=>k.startsWith("rainx-")).forEach(k=>localStorage.removeItem(k));}catch{} setSettingsPrefs({}); setSecurityPrefs({}); alert("Local RainX data cleared.");}} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
         </LightSection>
         <LightSection title="Legal & preferences">
-          <LightRow icon={FileCheck} title="Privacy Policy" subtitle="Review how personal information is handled" onPress={()=>alert("Open the RainX Privacy Policy from the legal centre.")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+           <LightRow icon={FileCheck} title="Privacy Policy" subtitle="Review how personal information is handled" onPress={()=>setSettingsSheet("legal")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           <LightDivider />
-          <LightRow icon={FileCheck} title="Terms of Service" subtitle="Review the rules governing RainX use" onPress={()=>alert("Open the RainX Terms from the legal centre.")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+           <LightRow icon={FileCheck} title="Terms of Service" subtitle="Review the rules governing RainX use" onPress={()=>setSettingsSheet("legal")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           <LightDivider />
           <LightRow icon={Cookie} title="Cookie & data preferences" subtitle="Manage optional analytics, personalization and marketing" onPress={()=>setSettingsSheet("cookies")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
         </LightSection>
+         {settingsSheet === "legal" && <LegalSheet onClose={()=>setSettingsSheet(null)} />}
       </div>
     </MoreSubScreen>
   );
@@ -7010,9 +7083,9 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         </LightSection>
 
         <LightSection title="Legal, privacy & data">
-          <LightRow icon={FileCheck} title="Privacy policy" subtitle="Review how RainX handles personal information" onPress={()=>setShowLegal(true)} right={<ChevronRight size={18} color={PREF_MUTED} />} />
+           <LightRow icon={FileCheck} title="Privacy policy" subtitle="Review how RainX handles personal information" onPress={()=>setSettingsSheet("legal")} right={<ChevronRight size={18} color={PREF_MUTED} />} />
           <LightDivider />
-          <LightRow icon={FileCheck} title="Terms of service" subtitle="Review the rules that apply to your account" onPress={()=>setShowLegal(true)} right={<ChevronRight size={18} color={PREF_MUTED} />} />
+           <LightRow icon={FileCheck} title="Terms of service" subtitle="Review the rules that apply to your account" onPress={()=>setSettingsSheet("legal")} right={<ChevronRight size={18} color={PREF_MUTED} />} />
           <LightDivider />
           <LightRow icon={Cookie} title="Cookie & tracking preferences" subtitle="Control optional analytics and personalization" onPress={()=>setSettingsSheet("cookies")} right={<ChevronRight size={18} color={PREF_MUTED} />} />
           <LightDivider />
@@ -7023,7 +7096,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
           <LightRow icon={Bell} title="Notification preferences" subtitle="Manage in-app and push alerts by category" onPress={()=>setMorePage("notifications")} right={<ChevronRight size={18} color={PREF_MUTED} />} />
         </LightSection>
 
-        {settingsSheet && <LightSheet onClose={()=>setSettingsSheet(null)}>
+        {settingsSheet && settingsSheet !== "legal" && <LightSheet onClose={()=>setSettingsSheet(null)}>
           {settingsSheet === "signalDelivery" && <>
             <LightSheetTitle title="Signal delivery" desc="Choose which trading signals reach you." />
             <LightChoice value="all" current={settingsPrefs.signalDelivery||"all"} title="All signals" desc="BUY, SELL and watchlist updates" onSelect={v=>{persistSettings({signalDelivery:v});setSettingsSheet(null)}} />
@@ -7071,6 +7144,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             <LightRow icon={Download} title="Export local preferences" subtitle="Save your RainX settings as a JSON file" onPress={()=>{try{const payload={exportedAt:new Date().toISOString(),settings:settingsPrefs,security:{...securityPrefs,pinHash:undefined,biometricCredentialId:undefined}};const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download="rainx-settings.json";a.click();URL.revokeObjectURL(url);setSettingsSheet(null)}catch{alert("Unable to export local preferences on this device.")}}} right={<ChevronRight size={18} color={PREF_MUTED} />} />
           </>}
         </LightSheet>}
+        {settingsSheet === "legal" && <LegalSheet onClose={()=>setSettingsSheet(null)} />}
       </div>
     </MoreSubScreen>
   );
@@ -7187,7 +7261,8 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             <LightDivider />
             <LightRow icon={Smartphone} title="Verified phone" subtitle="Add and verify a recovery phone number" onPress={()=>alert("Backend required: phone verification and recovery-factor storage.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
             <LightDivider />
-            <LightRow icon={Key} title="Recovery codes" subtitle="One-time codes for account recovery" onPress={()=>alert("Backend required: recovery-code generation.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
+             <LightRow icon={Key} title="Recovery codes" subtitle="Generate new one-time codes for account recovery" onPress={generateRecoveryCodes} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             {recoveryCodes.length > 0 && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"11px 12px",fontFamily:"monospace",fontSize:12,lineHeight:1.8,color:PREF_TEXT}}>Save these codes now. They are shown only once:<br />{recoveryCodes.map(code=><div key={code}>{code}</div>)}</div>}
           </>}
           {securitySheet === "loginHistory" && <>
             <LightSheetTitle title="Login history" desc="Recent RainX sign-ins and the devices currently holding sessions." />
@@ -7206,9 +7281,9 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
           </>}
           {securitySheet === "reportSecurity" && <>
             <LightSheetTitle title="Report a security issue" desc="Use the authenticated security-report endpoint when this flow is wired to the backend." />
-            <LightRow icon={ShieldCheck} title="Account may be compromised" subtitle="Start an urgent account-security review" onPress={()=>alert("Backend required: authenticated security incident/report endpoint.")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             <LightRow icon={ShieldCheck} title="Account may be compromised" subtitle="Start an urgent account-security review" onPress={()=>reportSecurityIssue("account_compromised")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
             <LightDivider />
-            <LightRow icon={Mail} title="Contact security support" subtitle="Send a protected security report with account context" onPress={()=>alert("Backend required: secure support/report submission.")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             <LightRow icon={Mail} title="Contact security support" subtitle="Send a protected security report with account context" onPress={()=>reportSecurityIssue("security_support")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           </>}
           {securitySheet === "tokenRisk" && <>
             <LightSheetTitle title="Internal-token risk & disclosure" desc="Creator tokens can carry market, liquidity, smart-contract and loss risks." />
@@ -7248,8 +7323,8 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
           </>}
           {securitySheet === "deleteAccount" && <>
             <LightSheetTitle title="Delete account" desc="Account deletion is permanent. Real deletion should require re-authentication and a trusted server-side deletion flow." />
-            <div style={{background:"#FFF4F4",border:"1px solid #F2B8B8",borderRadius:13,padding:"12px 13px",fontSize:11,color:"#8E2A2A",lineHeight:1.5,marginBottom:12}}>This client screen does not delete server data by itself. Connect it to your authenticated account-deletion endpoint before enabling permanent deletion.</div>
-            <button onClick={()=>{setSecuritySheet(null);alert("Deletion was not performed. A secure server-side account-deletion flow is required.")}} style={{width:"100%",background:"#C0392B",color:"#FFFFFF",border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer"}}>Continue</button>
+             <div style={{background:"#FFF4F4",border:"1px solid #F2B8B8",borderRadius:13,padding:"12px 13px",fontSize:11,color:"#8E2A2A",lineHeight:1.5,marginBottom:12}}>This submits a protected deletion request for backend review. Your account is not deleted immediately.</div>
+             <button onClick={requestAccountDeletion} style={{width:"100%",background:"#C0392B",color:"#FFFFFF",border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer"}}>Submit deletion request</button>
           </>}
           {securitySheet === "checkup" && <>
             <LightSheetTitle title="Security checkup" desc="A quick view of your current protection." />
