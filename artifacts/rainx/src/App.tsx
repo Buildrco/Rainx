@@ -6,7 +6,7 @@ import { Capacitor } from "@capacitor/core";
 import { App as CapacitorApp } from "@capacitor/app";
 import { consumeNativeBack } from "./nativeBackStack";
 import { supabase } from "./supabaseClient";
-import { clearNativeSessionUnlock, getNativeLockConfig, hasNativeUnlockedSession } from "./nativeSecurity";
+import { clearNativeSessionUnlock, getNativeLockConfig, hasNativeUnlockedSession, registerNativeDeviceSession, recordNativeLogin } from "./nativeSecurity";
 
 const LOCK_EVENT = "rainx:native-lock-state";
 const LOCK_CONFIG_EVENT = "rainx:native-lock-config-changed";
@@ -226,6 +226,10 @@ export default function App() {
       }
       previousAccountId.current=id;
       setAccount(u?{id:u.id,email:u.email}:null);
+      if (u) {
+        void registerNativeDeviceSession().catch(() => {});
+        if (event === "SIGNED_IN") void recordNativeLogin().catch(() => {});
+      }
       setAuthReady(true)
     });
     return()=>{mounted=false;clearTimeout(startupTimer);listener?.subscription?.unsubscribe()}
