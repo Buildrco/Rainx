@@ -158,7 +158,7 @@ function NativeBootScreen() {
 }
 
 export default function App() {
-  const [route,setRoute]=useState(()=>readHash()),[account,setAccount]=useState(null),[authReady,setAuthReady]=useState(false),[lockReady,setLockReady]=useState(!Capacitor.isNativePlatform()),[locked,setLocked]=useState(false);
+  const [route,setRoute]=useState(()=>readHash()),[account,setAccount]=useState(null),[authReady,setAuthReady]=useState(false),[lockReady,setLockReady]=useState(false),[locked,setLocked]=useState(false);
   const previousAccountId=useRef(null),forceLockOnNextAccountLoad=useRef(false);
 
   useEffect(() => installGlobalTouchFeedback(), []);
@@ -232,7 +232,6 @@ export default function App() {
   },[]);
 
   useEffect(()=>{
-    if(!Capacitor.isNativePlatform()){setLockReady(true);setLocked(false);return}
     if(!authReady){setLockReady(false);return}
     if(!account?.id){setLocked(false);setLockReady(true);return}
     let mounted=true;
@@ -253,12 +252,11 @@ export default function App() {
 
   useEffect(()=>{
     const onLock=e=>{
-      if(!Capacitor.isNativePlatform())return;
       setLocked(!!e?.detail?.locked);
       setLockReady(true)
     };
     const onConfig=async()=>{
-      if(!Capacitor.isNativePlatform()||!account?.id)return;
+      if(!account?.id)return;
       try{
         const c=await getNativeLockConfig(account.id);
         setLockReady(true);
@@ -277,12 +275,10 @@ export default function App() {
   },[account?.id]);
 
   useEffect(()=>{
-    if(!Capacitor.isNativePlatform()||!authReady||!account?.id)return;
+    if(!authReady||!account?.id)return;
     let mounted=true,wasBackgrounded=false,listener;
-    CapacitorApp.addListener("appStateChange",async({isActive})=>{
-      if(!mounted)return;
-      if(!isActive){wasBackgrounded=true;return}
-      if(!wasBackgrounded)return;
+    const lockOnResume = async () => {
+      if(!mounted||!wasBackgrounded)return;
       wasBackgrounded=false;
       try{
         const c=await getNativeLockConfig(account.id);
@@ -292,15 +288,27 @@ export default function App() {
         setLockReady(true);
         window.dispatchEvent(new CustomEvent(LOCK_EVENT,{detail:{locked:true}}))
       }catch{}
-    }).then(h=>listener=h).catch(()=>{});
-    return()=>{mounted=false;listener?.remove?.()}
+    };
+    const onVisibility = () => {
+      if (document.hidden) wasBackgrounded = true;
+      else lockOnResume();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if(Capacitor.isNativePlatform()) {
+      CapacitorApp.addListener("appStateChange",async({isActive})=>{
+        if(!mounted)return;
+        if(!isActive){wasBackgrounded=true;return}
+        lockOnResume();
+      }).then(h=>listener=h).catch(()=>{});
+    }
+    return()=>{mounted=false;listener?.remove?.();document.removeEventListener("visibilitychange", onVisibility)}
   },[account?.id,authReady]);
 
   const isMoreLanding=route.tab==="more"&&!route.sub;
 
   if(Capacitor.isNativePlatform()&&!authReady)return <NativeBootScreen />;
-  if(Capacitor.isNativePlatform()&&account?.id&&!lockReady)return <NativeBootScreen />;
-  if(Capacitor.isNativePlatform()&&account?.id&&locked)return <div style={APP_SURFACE}><NativeLockOverride account={account} initialLocked/></div>;
+  if(account?.id&&!lockReady)return <NativeBootScreen />;
+  if(account?.id&&locked)return <div style={APP_SURFACE}><NativeLockOverride account={account} initialLocked/></div>;
   if(account?.id&&isMoreLanding)return <div style={APP_SURFACE}><MoreLandingOverride account={account}/></div>;
   return <div style={APP_SURFACE}><RainXApp/><>{account?.id&&<NativeLockOverride account={account} initialLocked={false}/>}</></div>;
 }
