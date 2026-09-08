@@ -235,7 +235,7 @@ function ExternalPanel({ onConnect }) {
   );
 }
 
-function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange }) {
+function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange, coins, onSelectCoin }) {
   const viewportRef = useRef(null);
   const start = useRef(null);
   const dragProgressRef = useRef(0);
@@ -334,6 +334,8 @@ function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coin
           <SwipeArea
             mode={mode}
             setMode={setMode}
+            coins={coins}
+            onSelectCoin={onSelectCoin}
             onMyCoins={onMyCoins}
             onConnect={onConnect}
             onProgress={setSwipeProgress}
@@ -1511,7 +1513,10 @@ const createStyles = `
 export default function SpaceCoinsDashboard({ onBack }) {
   const [mode, setMode] = useState("space");
   const [screen, setScreen] = useState(() => {
-    try { return sessionStorage.getItem("rainx-space-screen") || "dashboard"; } catch { return "dashboard"; }
+    try {
+      const saved = sessionStorage.getItem("rainx-space-screen");
+      return ["dashboard", "create", "menu", "creator", "liquidity-manage", "liquidity-remove", "token-settings", "holders", "analytics", "transactions", "notifications"].includes(saved) ? saved : "dashboard";
+    } catch { return "dashboard"; }
   });
   const [overlay, setOverlay] = useState(null);
   const [coins, setCoins] = useState(COINS);
