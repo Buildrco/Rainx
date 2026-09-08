@@ -9,13 +9,14 @@
     "build:vercel": "vite build --config vite.config.vercel.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "cap:sync": "pnpm build && npx cap sync",
+    "cap:patch": "python3 ../../scripts/patch-android-bottom-sheet.py",
+    "cap:sync": "pnpm build && npx cap sync android && pnpm cap:patch",
     "cap:android": "pnpm cap:sync && npx cap open android",
     "cap:ios": "pnpm cap:sync && npx cap open ios",
     "cap:assets": "npx @capacitor/assets generate --iconBackgroundColor \"#0F0E0B\" --iconBackgroundColorDark \"#0F0E0B\" --splashBackgroundColor \"#0F0E0B\" --splashBackgroundColorDark \"#0F0E0B\"",
-    "cap:add:android": "npx cap add android",
+    "cap:add:android": "npx cap add android && pnpm cap:patch",
     "cap:add:ios": "npx cap add ios",
-    "cap:prepare": "pnpm build && (test -d android || npx cap add android) && (test -d ios || npx cap add ios) && npx cap sync && pnpm cap:assets"
+    "cap:prepare": "(test -d android || npx cap add android) && (test -d ios || npx cap add ios) && pnpm cap:sync && pnpm cap:assets"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",
