@@ -1,0 +1,10 @@
+revoke all on function public.get_my_auth_sessions() from public, anon;
+revoke all on function public.register_my_device_session(text,text,text,text,text,text,text) from public, anon;
+revoke all on function public.record_my_login_event(text,text,text,text,text,text,text) from public, anon;
+revoke all on function public.set_my_pin(text) from public, anon;
+revoke all on function public.delete_my_pin(text) from public, anon;
+grant execute on function public.get_my_auth_sessions() to authenticated;
+grant execute on function public.register_my_device_session(text,text,text,text,text,text,text) to authenticated;
+grant execute on function public.record_my_login_event(text,text,text,text,text,text,text) to authenticated;
+grant execute on function public.set_my_pin(text) to authenticated;
+grant execute on function public.delete_my_pin(text) to authenticated;
