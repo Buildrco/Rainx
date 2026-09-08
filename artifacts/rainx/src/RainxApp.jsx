@@ -2368,33 +2368,3377 @@ function MainAppContent({ account, onLogout }) {
   useEffect(() => {
     if (!account?.id) return;
     let cancelled = false;
+    const loadCommunityUnreadCount = async () => {
+      const { count } = await supabase
+        .from("community_notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", account.id)
+        .eq("read", false);
+      if (!cancelled) {
+        // Never let a stale poll shrink the badge below a realtime increment
+        // that the database may not have caught up to yet (replication lag).
+        // This stops the community menu badge from flickering "on and off".
+        const dbCount = count || 0;
+        setCommunityUnreadCount((current) => Math.max(current, dbCount));
+      }
+    };
+    loadCommunityUnreadCount();
+    const interval = window.setInterval(loadCommunityUnreadCount, 30000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [account?.id]);
+
+  // When the community notification sheet marks everything read, clear the
+  // community menu-icon badge instantly instead of waiting for the next poll.
+  useEffect(() => {
+    const onRead = () => setCommunityUnreadCount(0);
+    const onCommunityNotification = async () => {
+      if (!account?.id) return;
+      const { count } = await supabase
+        .from("community_notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", account.id)
+        .eq("read", false);
+      setCommunityUnreadCount(count || 0);
+    };
+    window.addEventListener("rainx:community-notifs-read", onRead);
+    window.addEventListener("rainx:community-notification-received", onCommunityNotification);
+    return () => {
+      window.removeEventListener("rainx:community-notifs-read", onRead);
+      window.removeEventListener("rainx:community-notification-received", onCommunityNotification);
+    };
+  }, [account?.id]);
+
+  // Checks one (instrument, timeframe) combo's latest candle. If it's the
+  // same candle as last time, does nothing - signals only refresh when a
+  // genuinely new candle has closed, so they stay stable instead of flickering.
+  // checkCandle now calls the Raina-AI bot directly instead of Claude.
+  // The bot fetches its own market data (yfinance) and runs the full
+  // technical analysis engine, then returns a structured Signal.
+  const checkCandle = useCallback(async (inst, tf) => {
+    if (!isMarketOpen(inst.cls)) return;
+    const key = `${inst.symbol}_${tf.key}`;
+    const now = Date.now();
+    // Throttle: skip until this timeframe's own candle window has actually
+    // elapsed (15m holds ~15 min, 1h holds ~1h, 4h holds ~4h, etc.) instead
+    // of a flat 4 minutes for every timeframe.
+    if (lastCandleTimeRef.current[key] && now - lastCandleTimeRef.current[key] < stabilityWindowFor(tf.key)) return;
+    try {
+      const wasFirstLoad = !notifiedKeysRef.current.has(key);
+      notifiedKeysRef.current.add(key);
+      setLoadingKey(key);
+      const res = await fetch(`/api/signals/long-term/${encodeURIComponent(inst.symbol)}?timeframe=${tf.key}`);
+      setLoadingKey((k) => (k === key ? null : k));
+      if (!res.ok) return;
+      const signal = await res.json();
+
+      lastCandleTimeRef.current[key] = now;
+
+      // Map Raina-AI Signal shape → RainX UI shape
+      const result = {
+        bias: (signal.direction || "HOLD").toLowerCase(),
+        confidence: signal.confidence || 0,
+        entry: Array.isArray(signal.entry_zone) && signal.entry_zone.length >= 2
+          ? (signal.entry_zone[0] + signal.entry_zone[1]) / 2
+          : null,
+        stop_loss: signal.stop_loss || null,
+        take_profit_1: Array.isArray(signal.take_profit) ? (signal.take_profit[0] || null) : null,
+        take_profit_2: Array.isArray(signal.take_profit) ? (signal.take_profit[1] || null) : null,
+        risk_level: (signal.risk_level || "MEDIUM").toLowerCase(),
+        timeframe: signal.timeframe || tf.key,
+        reason: signal.explanation || "",
+      };
+
+      if (result.bias !== "hold" && result.confidence < 65) {
+        result.bias = "hold";
+        result.reason = "Confidence was below our 65% quality bar, so no trade is being suggested right now. " + result.reason;
+      }
+
+      setSignalsMap((prev) => ({
+        ...prev,
+        [inst.symbol]: {
+          ...prev[inst.symbol],
+          [tf.key]: { ...result, digits: inst.digits, name: inst.name, timeframeLabel: tf.label, generatedAt: Date.now(), status: "active", milestones: [] },
+        },
+      }));
+
+      // ── Update this symbol's session with real signal data from backend ──
+      if (result.bias === "hold" || result.entry != null) {
+        setSessions(prev => {
+          const sess = prev[inst.symbol];
+          if (!sess || sess.state === "completed") return prev;
+          const tfKey  = tf.key;
+          const tfLbl  = tf.label; // e.g. "15 Minute" or "1 Hour"
+
+          // HOLD: write real confidence into setupByTf and clear this TF's overlays
+          if (result.bias === "hold") {
+            const newSetup = {
+              bias:       "HOLD",
+              entry:      null,
+              entryLow:   null,
+              entryHigh:  null,
+              stopLoss:   null,
+              tp1:        null,
+              tp2:        null,
+              rr:         null,
+              confidence: result.confidence,
+              reason:     result.reason,
+            };
+            // Clear this TF's signal overlays so the chart doesn't show stale entry/SL/TP lines
+            const overlaysByTf = { ...sess.overlaysByTf, [tfKey]: [] };
+            // Rebuild session.overlays: keep structural + current_price, drop this TF's old overlays
+            const keepTypes = new Set(["trendline","channel","support_zone","resistance","liquidity","swing_high","swing_low","market_structure","current_price"]);
+            const baseOverlays = (sess.overlays || []).filter(o => keepTypes.has(o.type) || (!o._tf));
+            const remainingTfOverlays = Object.entries(overlaysByTf)
+              .filter(([k]) => k !== tfKey)
+              .flatMap(([, v]) => v);
+            return { ...prev, [inst.symbol]: {
+              ...sess,
+              overlays: [...baseOverlays, ...remainingTfOverlays],
+              overlaysByTf,
+              setupByTf: { ...sess.setupByTf, [tfKey]: newSetup },
+            } };
+          }
+
+          const price  = result.entry;
+          const slDist = result.stop_loss   ? Math.abs(price - result.stop_loss)   : inst.vol * 2.5;
+          const tp1    = result.take_profit_1;
+          const tp2    = result.take_profit_2;
+
+          // Keep structural (non-signal) overlays across timeframe updates
+          const keepTypes = new Set(["trendline","channel","support_zone","resistance","liquidity","swing_high","swing_low","market_structure"]);
+          const baseStructural = (sess.overlays || []).filter(o => keepTypes.has(o.type));
+
+          // Per-TF signal overlays — tagged with _tf so both 15m and 1h show on chart simultaneously
+          const tfOverlays = [
+            { type:"entry_zone", _tf: tfKey,
+              priceLow:  Array.isArray(signal.entry_zone) ? signal.entry_zone[0] : price-inst.vol*0.5,
+              priceHigh: Array.isArray(signal.entry_zone) ? signal.entry_zone[1] : price+inst.vol*0.5 },
+            { type:"sl_level",   _tf: tfKey, price: result.stop_loss || price - slDist, label: "SL (" + tfLbl + ")" },
+            ...(tp1 != null ? [{ type:"tp_level", _tf: tfKey, price: tp1, label: "TP1 (" + tfLbl + ")" }] : []),
+            ...(tp2 != null ? [{ type:"tp_level", _tf: tfKey, price: tp2, label: "TP2 (" + tfLbl + ")" }] : []),
+            { type:"direction_arrow", _tf: tfKey, from: price,
+              target: tp1 || (result.bias === "sell" ? price - slDist * 1.5 : price + slDist * 1.5),
+              bias: result.bias },
+            ...(tp2 != null ? [{ type:"projection", _tf: tfKey, target: tp2, bias: result.bias }] : []),
+            { type:"breakout", _tf: tfKey, priceLow: price + inst.vol*0.3, priceHigh: price + inst.vol*1.0 },
+          ];
+
+          // Accumulate overlays per-TF — keep all TFs stored; render only selected TF at chart site
+          const overlaysByTf = { ...sess.overlaysByTf, [tfKey]: tfOverlays };
+          const allTfOverlays = overlaysByTf[tfKey];
+
+          // One current_price overlay (live price line — no TF tag)
+          const currentPriceOverlay = { type: "current_price", price };
+
+          const mergedOverlays = [
+            ...baseStructural,
+            currentPriceOverlay,
+            ...allTfOverlays,
+          ];
+
+          const newSetup = {
+            bias:      result.bias.toUpperCase(),
+            entry:     price,
+            entryLow:  Array.isArray(signal.entry_zone) ? signal.entry_zone[0] : price-inst.vol*0.5,
+            entryHigh: Array.isArray(signal.entry_zone) ? signal.entry_zone[1] : price+inst.vol*0.5,
+            stopLoss:  result.stop_loss || price - slDist,
+            tp1:       tp1 || price + slDist * 1.5,
+            tp2:       tp2 || price + slDist * 3.0,
+            rr:        (slDist > 0 ? ((tp1 || price + slDist * 1.5) - price) / slDist : 1.5).toFixed(1),
+            confidence: result.confidence,
+            reason:     result.reason,
+          };
+
+          return { ...prev, [inst.symbol]: {
+            ...sess,
+            overlays: mergedOverlays,
+            overlaysByTf,
+            setupByTf: { ...sess.setupByTf, [tfKey]: newSetup },
+          } };
+        });
+      }
+
+      supabase.from("signals").upsert({
+        symbol: inst.symbol, timeframe: tf.key, candle_time: new Date().toISOString(),
+        bias: result.bias, confidence: result.confidence, entry: result.entry,
+        stop_loss: result.stop_loss, take_profit_1: result.take_profit_1, take_profit_2: result.take_profit_2,
+        risk_level: result.risk_level, reason: result.reason, status: "active", milestones: [],
+        generated_at: new Date().toISOString(),
+      }, { onConflict: "symbol,timeframe" }).then(() => {}, () => {});
+
+      if (!wasFirstLoad && result.bias !== "hold" && result.confidence >= 65) {
+        const verb = result.bias === "buy" ? "Buy" : "Sell";
+        pushNotification({
+          type: "signal", symbol: inst.symbol,
+          title: `${result.bias === "buy" ? "🟢" : "🔴"} ${verb} ${inst.name} — ${tf.label} signal`,
+          body: `${result.confidence}% confidence · ${result.reason}`,
+        });
+      }
+    } catch { /* keep the existing signal if the fetch fails */ }
+  }, [pushNotification]);
+
+  const allCombos = [];
+  INSTRUMENTS.forEach((inst) => {
+    // Only scan markets the user has explicitly activated
+    if (activeMarkets.includes(inst.symbol)) {
+      TIMEFRAMES.forEach((tf) => allCombos.push({ inst, tf }));
+    }
+  });
+
+  useEffect(() => {
     (async () => {
-      const [{ data, error }, { data: authUser }] = await Promise.all([
-        supabase.from("account_settings").select("settings,security_prefs").eq("user_id", account.id).maybeSingle(),
-        supabase.auth.getUser(),
+      // Load whatever signals already exist in Supabase first, so a reload,
+      // logout/login, or new device shows the SAME still-open signal instead
+      // of triggering a fresh (and possibly different) Raina call.
+      try {
+        const { data } = await supabase.from("signals").select("*");
+        if (data && data.length) {
+          const map = {};
+          data.forEach((row) => {
+            const inst = INSTRUMENTS.find((i) => i.symbol === row.symbol);
+            if (!inst) return;
+            if (!map[row.symbol]) map[row.symbol] = {};
+            map[row.symbol][row.timeframe] = {
+              bias: row.bias, confidence: row.confidence, entry: row.entry, stop_loss: row.stop_loss,
+              take_profit_1: row.take_profit_1, take_profit_2: row.take_profit_2, risk_level: row.risk_level,
+              reason: row.reason, digits: inst.digits, name: inst.name, timeframe: row.timeframe,
+              timeframeLabel: TIMEFRAMES.find((t) => t.key === row.timeframe)?.label || row.timeframe,
+              generatedAt: new Date(row.generated_at).getTime(), status: row.status || "active", milestones: row.milestones || [],
+            };
+            // row.candle_time comes back from Supabase as an ISO string. The
+            // throttle check does plain number subtraction (now - lastCandleTimeRef),
+            // and `Date.now() - "2026-..."` evaluates to NaN in JS, which silently
+            // disabled the stability window on every reload. Store it as epoch ms.
+            const parsedCandleTime = row.candle_time ? new Date(row.candle_time).getTime() : Date.now();
+            lastCandleTimeRef.current[`${row.symbol}_${row.timeframe}`] = Number.isFinite(parsedCandleTime) ? parsedCandleTime : Date.now();
+          });
+          setSignalsMap(map);
+        }
+      } catch { /* if this fails, checkCandle below will just generate fresh signals as before */ }
+
+      // Now check each combo - this will correctly do nothing for any combo
+      // whose candle hasn't actually changed since the persisted signal.
+      allCombos.forEach(({ inst, tf }, idx) => setTimeout(() => checkCandle(inst, tf), idx * 1200));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+
+  useEffect(() => {
+    if (!autoScan) return;
+    let i = 0;
+    // 3 min between checks; 3 instruments x 2 timeframes = 6 combos, so each
+    // gets re-checked roughly every 18 min - enough to catch 15M/1H candle
+    // closes reliably while staying well under the free-tier request budget.
+    const id = setInterval(() => {
+      const { inst, tf } = allCombos[i % allCombos.length];
+      i += 1;
+      checkCandle(inst, tf);
+    }, 180000);
+    return () => clearInterval(id);
+  }, [autoScan, checkCandle]);
+
+  // Live milestone + TP/SL monitor - runs against the live price ticker so
+  // profit updates feel responsive even though signals only refresh on candle close.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const sideEffects = []; // collected here, run AFTER state update - keeps the updater pure
+
+      setSignalsMap((prevMap) => {
+        let changed = false;
+        const next = {};
+        Object.keys(prevMap).forEach((symbol) => { next[symbol] = { ...prevMap[symbol] }; });
+
+        INSTRUMENTS.forEach((inst) => {
+          const arr = seriesMapRef.current[inst.symbol];
+          const price = arr && arr[arr.length - 1] ? arr[arr.length - 1].price : null;
+          if (!price || !next[inst.symbol]) return;
+
+          TIMEFRAMES.forEach((tf) => {
+            const sig = next[inst.symbol][tf.key];
+            if (!sig || sig.status !== "active" || sig.bias === "hold") return;
+
+            const dir = sig.bias === "buy" ? 1 : -1;
+            const profit = (price - sig.entry) * dir;
+            const slDist = Math.abs(sig.entry - sig.stop_loss);
+            const tpDist = Math.abs(sig.take_profit_1 - sig.entry);
+            let updatedSig = sig;
+
+            [10, 25, 50, 100].forEach((step) => {
+              if (profit >= step && !updatedSig.milestones.includes(step)) {
+                updatedSig = { ...updatedSig, milestones: [...updatedSig.milestones, step] };
+                changed = true;
+                sideEffects.push(() => pushNotification({ type: "update", symbol: inst.symbol, title: `+${step} ${unitFor(inst)} — ${inst.name} (${tf.label})`, body: `Trade is now moving +${step} ${unitFor(inst)} in profit.` }));
+              }
+            });
+
+            if (profit <= -slDist) {
+              updatedSig = { ...updatedSig, status: "sl_hit" };
+              changed = true;
+              sideEffects.push(() => pushNotification({ type: "warning", symbol: inst.symbol, title: `${inst.name} (${tf.label}) — Stop Loss hit`, body: "Stop Loss hit. Your capital was protected by our risk-management limits. We are analyzing the next high-probability market setup." }));
+              sideEffects.push(() => saveTradeHistory(account, inst, tf, sig, "sl", -Math.round(slDist)));
+            } else if (profit >= tpDist) {
+              updatedSig = { ...updatedSig, status: "tp_hit" };
+              changed = true;
+              sideEffects.push(() => pushNotification({ type: "update", symbol: inst.symbol, title: `🎯 Take Profit Hit — ${inst.name} (${tf.label})`, body: `Take Profit reached! +${Math.round(tpDist)} ${unitFor(inst)}.` }));
+              sideEffects.push(() => saveTradeHistory(account, inst, tf, sig, "tp", Math.round(tpDist)));
+            }
+
+            if (updatedSig !== sig) {
+              next[inst.symbol] = { ...next[inst.symbol], [tf.key]: updatedSig };
+              const candleTime = lastCandleTimeRef.current[`${inst.symbol}_${tf.key}`];
+              sideEffects.push(() =>
+                supabase.from("signals").upsert({
+                  symbol: inst.symbol, timeframe: tf.key, candle_time: candleTime,
+                  bias: updatedSig.bias, confidence: updatedSig.confidence, entry: updatedSig.entry,
+                  stop_loss: updatedSig.stop_loss, take_profit_1: updatedSig.take_profit_1, take_profit_2: updatedSig.take_profit_2,
+                  risk_level: updatedSig.risk_level, reason: updatedSig.reason, status: updatedSig.status, milestones: updatedSig.milestones,
+                }, { onConflict: "symbol,timeframe" }).then(() => {}, () => {})
+              );
+            }
+          });
+        });
+
+        return changed ? next : prevMap;
+      });
+
+      sideEffects.forEach((fn) => fn());
+    }, 15000);
+    return () => clearInterval(id);
+  }, [pushNotification, account]);
+
+  // When any session transitions to "watching", immediately fetch a real signal
+  // from the backend for that market instead of waiting for the scan loop.
+  useEffect(() => {
+    if (!_watchingKey) return;
+    _watchingKey.split(",").forEach(symbol => {
+      const inst2 = ALL_ASSETS.find(a => a.symbol === symbol);
+      if (!inst2) return;
+      // Clear throttle so the first call always goes through
+      delete lastCandleTimeRef.current[`${symbol}_15m`];
+      delete lastCandleTimeRef.current[`${symbol}_1h`];
+      delete lastCandleTimeRef.current[`${symbol}_4h`];
+      checkCandle(inst2, { key: "15m", label: "15M" });
+      checkCandle(inst2, { key: "1h",  label: "1H" });
+      checkCandle(inst2, { key: "4h",  label: "4H" });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_watchingKey]);
+
+  const activeSignal = signalsMap[activeSymbol]?.[selectedTf] || null;
+
+  return (
+    <PullToRefresh>
+      <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", overscrollBehaviorY: "none", touchAction: "pan-y", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
+        * { box-sizing: border-box; }
+        body { margin:0; }
+        @keyframes slideDown { from { transform: translateY(-30px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+        @keyframes priceFlash { 0% { opacity:0.4; } 100% { opacity:1; } }
+        @keyframes rx-slide-in-right { from { transform:translateX(40px); opacity:0; } to { transform:translateX(0); opacity:1; } }
+        @keyframes rx-slide-in-left  { from { transform:translateX(-40px); opacity:0; } to { transform:translateX(0); opacity:1; } }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n        @keyframes rx-breathe { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.68; transform:scale(.985); } }
+        .rx-slide-right { animation: rx-slide-in-right 0.42s cubic-bezier(0.22,1,0.36,1) both; }
+        .rx-slide-left  { animation: rx-slide-in-left  0.42s cubic-bezier(0.22,1,0.36,1) both; }
+        .hide-scroll::-webkit-scrollbar { display:none; }
+        .hide-scroll { -ms-overflow-style:none; scrollbar-width:none; }
+        /* Disable native rubber-band/pull-to-refresh globally; internal refresh buttons remain available. */
+        .rx-app-root { overscroll-behavior-y: none; }
+        .rx-standalone-route { overscroll-behavior-y: none; }
+        .scroll-hint::after { content:''; position:absolute; bottom:0; left:0; right:0; height:2px; background:linear-gradient(90deg,transparent,rgba(244,211,94,0.5),transparent); opacity:0; transition:opacity 0.3s; pointer-events:none; }
+        .scroll-hint.scrolling::after { opacity:1; }
+      `}</style>
+
+      <Toast
+        toast={activeToast}
+        onDone={() => setActiveToast(null)}
+        onOpen={openNotificationTarget}
+      />
+
+      {tab === "home" && <div style={{ background: "transparent", borderBottom: "none", padding: "16px 18px 14px", minHeight: 82, display: "flex", justifyContent: "space-between", alignItems: "center", position: "relative", zIndex: 20, boxShadow: "none" }}>
+        {/* ── Profile avatar trigger ── */}
+          <button onClick={() => { setProfileFromHeader(true); setMorePage("profile-menu"); routeWrite(tab, "profile-menu", "h"); }} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}>
+              <HeaderAvatar account={account} morePage={morePage} T={T} />
+            </button>
+        <button onClick={() => {
+          setShowNotifPanel(true);
+          const unreadIds = notifications.filter((n) => !n.read).map((n) => n.id);
+          setNotifications((list) => list.map((n) => ({ ...n, read: true })));
+          if (account?.id && unreadIds.length) {
+            supabase.from("user_notifications").update({ read: true }).eq("user_id", account.id).in("id", unreadIds).then(() => {}, () => {});
+          }
+        }} style={{ position: "relative", background: "none", border: "none", color: "#0F0E0B", cursor: "pointer", padding: 4 }}>
+          <Bell size={24} strokeWidth={1.8} fill="#0F0E0B" color="#0F0E0B" />
+          {unreadCount > 0 && (
+            <span style={{ position: "absolute", top: -6, right: -8, background: T.rust, color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 10, minWidth: 16, height: 16, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>
+              {unreadCount > 99 ? "99+" : unreadCount}
+            </span>
+          )}
+        </button>
+      </div>}
+
+      {/* Community — lazy keep-alive: mounts on first visit, never unmounts again */}
+      {communityMounted && (
+        <div style={{ display: tab === "community" ? "block" : "none", paddingBottom: 78 }}>
+          <CommunityTab account={account} entitlement={entitlement} themeTokens={T} onViewingProfileChange={(uid) => setCommunityProfileOpen(!!uid)} />
+        </div>
+      )}
+      {/* Scalping — lazy keep-alive: mounts on first visit, never unmounts again */}
+      {scalpingMounted && (
+        <div style={{ display: tab === "scalping" ? "block" : "none", paddingBottom: 78 }}>
+          <ScalpingTab account={account} entitlement={entitlement} onSubscribe={() => goTab("subscribe")} />
+        </div>
+      )}
+
+      {/* Animated tab container — key forces remount, triggering CSS slide per direction */}
+      {tab !== "community" && tab !== "scalping" && (
+      <div
+        key={tab}
+        className={tabDirRef.current >= 0 ? "rx-slide-right" : "rx-slide-left"}
+        style={{ paddingBottom: 78 }}
+      >
+        {tab === "home" && <HomeTabErrorBoundary><HomeTab account={account} inst={inst} marketOpen={marketOpen} last={last} changePct={changePct} series={series} activeSymbol={activeSymbol} setActiveSymbol={setActiveSymbol} entitlement={entitlement} onSubscribe={() => goTab("subscribe")} session={session} sessions={sessions} sessionSecsLeft={sessionSecsLeft} startAnalysisSession={startAnalysisSession} seriesMap={seriesMap} signalsMap={signalsMap} themeMode={themeMode} activeMarkets={activeMarkets} addActiveMarket={addActiveMarket} removeActiveMarket={removeActiveMarket} replaceActiveMarket={replaceActiveMarket} reorderActiveMarkets={reorderActiveMarkets} maxActiveMarkets={MAX_ACTIVE_MARKETS} resetMarkets={resetMarkets} lastMarketReset={lastMarketReset} /></HomeTabErrorBoundary>}
+        {tab === "wallet" && <WalletTab account={account} />}
+        {tab === "history" && <HistoryTab account={account} entitlement={entitlement} onSubscribe={() => goTab("subscribe")} />}
+        {tab === "subscribe" && <SubscribeScreen account={account} entitlement={entitlement} onBack={() => goTab("more", -1)} />}
+        {tab === "more" && <MoreTabErrorBoundary><MoreTab autoScan={autoScan} setAutoScan={setAutoScan} analysis={activeSignal} inst={inst} last={last} account={account} onLogout={onLogout} onLogoutConfirm={() => setShowLogoutConfirm(true)} setTab={goTab} entitlement={entitlement} themeMode={themeMode} setThemeMode={setThemeMode} morePage={morePage} setMorePage={setMorePage} setProfileFromHeader={setProfileFromHeader} activeMarkets={activeMarkets} /></MoreTabErrorBoundary>}
+      </div>
+      )}
+
+      {/* ── Profile overlay — opens over any tab when accessed from header/sidebar ── */}
+      {profileFromHeader && morePage && tab !== "more" && (
+        <div className="rx-standalone-route" style={{ background:T.ink }}>
+          <MoreTabErrorBoundary>
+            <MoreTab autoScan={autoScan} setAutoScan={setAutoScan} analysis={activeSignal} inst={inst} last={last} account={account} onLogout={onLogout} onLogoutConfirm={() => setShowLogoutConfirm(true)} setTab={goTab} entitlement={entitlement} themeMode={themeMode} setThemeMode={setThemeMode} morePage={morePage} setMorePage={setMorePage} setProfileFromHeader={setProfileFromHeader} activeMarkets={activeMarkets} />
+          </MoreTabErrorBoundary>
+        </div>
+      )}
+
+      {/* ── Sidebar drawer (hamburger menu) ──────────────────────────────── */}
+      {showSidebar && (
+        <div style={{ position:"fixed", inset:0, zIndex:500, display:"flex" }}>
+          {/* Backdrop */}
+          <div onClick={() => setShowSidebar(false)} style={{ position:"absolute", inset:0, background:"rgba(0,0,0,0.45)", backdropFilter:"blur(2px)" }} />
+          {/* Panel */}
+          <div style={{
+            position:"relative", width:"82%", maxWidth:320, height:"100%",
+            background:T.card, borderRight:`1px solid ${T.cardBorder}`,
+            display:"flex", flexDirection:"column", overflow:"hidden",
+            animation:"slideInLeft 0.22s ease",
+          }}>
+            <style>{"@keyframes slideInLeft { from { transform:translateX(-100%); } to { transform:translateX(0); } }"}</style>
+
+            {/* Header */}
+            <div style={{ padding:"22px 20px 16px", borderBottom:`1px solid ${T.cardBorder}`, background:`linear-gradient(135deg,${T.gold}18,transparent)` }}>
+              <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:20, color:T.goldBright, letterSpacing:-0.3, marginBottom:2 }}>RainX</div>
+              <div style={{ fontSize:10, color:T.muted, fontWeight:600 }}>Powered by Raina AI</div>
+              {/* Clickable Profile */}
+              <button onClick={() => { setProfileFromHeader(true); setMorePage("profile-menu"); setShowSidebar(false); routeWrite(tab, "profile-menu", "h"); }} style={{ marginTop:18, width:"100%", display:"flex", alignItems:"center", gap:12, background:T.ink, border:`1px solid ${T.cardBorder}`, borderRadius:14, padding:"12px 14px", cursor:"pointer", textAlign:"left" }}>
+                <div style={{ width:44, height:44, borderRadius:"50%", background:T.goldGradient, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:FONT_HEAD, fontWeight:800, fontSize:16, color:T.ink, flexShrink:0 }}>
+                  {(account?.email || "?")[0].toUpperCase()}
+                </div>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:13, color:T.paper }}>Profile</div>
+                  <div style={{ fontSize:10.5, color:T.muted, marginTop:2 }}>View &amp; edit your profile</div>
+                </div>
+                <ChevronRight size={15} color={T.muted} />
+              </button>
+            </div>
+
+            {/* Nav items */}
+            <div style={{ flex:1, overflowY:"auto", padding:"8px 0" }}>
+              {[
+                { icon:Users2,      label:"Profile",        action:() => { setMorePage("profile");  goTab("more"); setShowSidebar(false); } },
+                { icon:Wallet,      label:"Creator Wallet", action:() => { setMorePage("wallet");   goTab("more"); setShowSidebar(false); } },
+                { icon:ShieldCheck, label:"Security",       action:() => { setMorePage("security"); goTab("more"); setShowSidebar(false); } },
+                { icon:Settings,    label:"Settings",       action:() => { setMorePage("settings"); goTab("more"); setShowSidebar(false); } },
+                null,
+                { icon:LogOut,      label:"Log out",        action:() => { setShowSidebar(false); setLogoutClosing(false); setShowLogoutConfirm(true); }, danger:true },
+              ].map((item, i) => item === null ? (
+                <div key={`div-${i}`} style={{ height:1, background:T.cardBorder, margin:"6px 16px" }} />
+              ) : (
+                <button key={item.label} onClick={item.action} style={{ width:"100%", display:"flex", alignItems:"center", gap:14, padding:"13px 20px", background:"none", border:"none", cursor:"pointer" }}>
+                  <item.icon size={18} color={item.danger ? T.rust : T.gold} />
+                  <span style={{ fontFamily:FONT_HEAD, fontWeight:700, fontSize:14, color:item.danger ? T.rust : T.paper }}>{item.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div style={{ padding:"14px 20px", borderTop:`1px solid ${T.cardBorder}` }}>
+              <div style={{ fontSize:10, color:T.muted, lineHeight:1.7 }}>RainX is an analysis tool, not a broker. AI analysis is not financial advice.</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNotifPanel && (
+        <div style={{ position: "fixed", inset: 0, background: T.ink, zIndex: 500, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            {/* Header */}
+            <div style={{ padding: "16px 18px 10px", borderBottom: `1px solid ${T.cardBorder}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+              <div style={{ fontFamily: FONT_HEAD, fontSize: 17, color: T.paper, fontWeight: 700 }}>Notifications</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {notifications.length > 0 && (
+                  <button onClick={() => setShowClearAllConfirm(true)} style={{ background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 7, padding: "4px 10px", fontSize: 11, color: T.muted, cursor: "pointer", fontFamily: FONT_HEAD, fontWeight: 600 }}>Clear all</button>
+                )}
+                <button onClick={() => setShowNotifPanel(false)} style={{ background: "none", border: "none", color: T.muted, cursor: "pointer" }}><X size={20} /></button>
+              </div>
+            </div>
+            {/* Body */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "10px 18px 18px" }}>
+              <BlurGate unlocked={hasAccess(entitlement.tier, "weekly")} requiredLabel="Weekly" onSubscribe={() => { setShowNotifPanel(false); setTab("subscribe"); }} minHeight={140}>
+                {notifications.length === 0 ? (
+                  <div style={{ fontSize: 12, color: T.muted, paddingTop: 8 }}>Nothing yet. You'll only be notified for strong setups and trade updates — not every tick.</div>
+                ) : (() => {
+                  const nowDate = new Date();
+                  const todayStr = nowDate.toDateString();
+                  const yestStr = new Date(nowDate - 86400000).toDateString();
+                  const getGroup = (n) => {
+                    const d = new Date(n.created_at || Date.now()).toDateString();
+                    if (d === todayStr) return "Today";
+                    if (d === yestStr) return "Yesterday";
+                    return "Earlier";
+                  };
+                  const groups = ["Today", "Yesterday", "Earlier"].map(label => ({
+                    label, items: notifications.filter(n => getGroup(n) === label)
+                  })).filter(g => g.items.length > 0);
+                  const allUngrouped = groups.length === 0;
+                  const list = allUngrouped ? [{ label: null, items: notifications }] : groups;
+                  return list.map(group => (
+                    <div key={group.label || "all"}>
+                      {group.label && <div style={{ fontSize: 10, color: T.muted, fontFamily: FONT_HEAD, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, padding: "12px 0 6px" }}>{group.label}</div>}
+                      {group.items.map((n) => {
+                        const market = isMarketNotification(n);
+                        return (
+                        <div key={n.id} style={{ borderBottom: `1px solid ${T.cardBorder}`, padding: "10px 0", display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                          {market && <MarketNotifAvatar n={n} size={40} />}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                              {!n.read && <div style={{ width: 6, height: 6, borderRadius: "50%", background: T.gold, flexShrink: 0 }} />}
+                              <div style={{ fontSize: 13, fontWeight: 700, color: T.paper, lineHeight: 1.35 }}>{n.title}</div>
+                            </div>
+                            <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2, fontWeight: 500, lineHeight: 1.45 }}>{n.body}</div>
+                            <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{notifTimeAgo(n)}</div>
+                          </div>
+                          <button onClick={() => setNotifToDelete(n)} style={{ background: "none", border: "none", color: T.muted, cursor: "pointer", padding: "2px 4px", flexShrink: 0, alignSelf: "flex-start" }}><X size={13} /></button>
+                        </div>
+                        );
+                      })}
+                    </div>
+                  ));
+                })()}
+              </BlurGate>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Notification delete confirmation modal ── */}
+      {notifToDelete && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.75)", zIndex:600, display:"flex", alignItems:"center", justifyContent:"center", padding:"0 20px" }} onClick={() => setNotifToDelete(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background:T.card, border:`1px solid ${T.cardBorder}`, borderRadius:20, padding:24, maxWidth:360, width:"100%" }}>
+            <div style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:17, color:T.paper, marginBottom:10 }}>Delete notification?</div>
+            <div style={{ fontSize:12.5, color:T.muted, lineHeight:1.7, marginBottom:20 }}>
+              This notification will be permanently removed from your list. You won't be able to recover it after deleting.
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => setNotifToDelete(null)} style={{ flex:1, background:"none", border:`1px solid ${T.cardBorder}`, borderRadius:12, padding:"13px 0", fontFamily:FONT_HEAD, fontWeight:700, fontSize:13, color:T.paper, cursor:"pointer" }}>Cancel</button>
+              <button onClick={() => {
+                const n = notifToDelete;
+                setNotifToDelete(null);
+                setNotifications(list => list.filter(x => x.id !== n.id));
+                if (account?.id) supabase.from("user_notifications").delete().eq("id", n.id).then(() => {}, () => {});
+              }} style={{ flex:1, background:"#E53935", border:"none", borderRadius:12, padding:"13px 0", fontFamily:FONT_HEAD, fontWeight:700, fontSize:13, color:"#fff", cursor:"pointer" }}>Clear all</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Logout confirmation modal ── */}
+      {showLogoutConfirm && <div onClick={closeLogoutConfirm} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.72)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 20px",animation:logoutClosing?"logoutOverlayOut .3s ease-in both":"logoutOverlayIn .28s ease-out both"}}>
+        <style>{"@keyframes logoutOverlayIn{from{opacity:0}to{opacity:1}}@keyframes logoutOverlayOut{from{opacity:1}to{opacity:0}}@keyframes logoutPopupSpring{0%{transform:translateY(34px) scale(.82);opacity:0}60%{transform:translateY(-5px) scale(1.025);opacity:1}100%{transform:translateY(0) scale(1);opacity:1}}@keyframes logoutPopupReverse{from{transform:translateY(0) scale(1);opacity:1}to{transform:translateY(34px) scale(.82);opacity:0}}@keyframes logoutBackingIn{from{transform:rotate(0deg) scale(.82);opacity:0}to{transform:rotate(5deg) scale(1);opacity:1}}@keyframes logoutBackingOut{from{transform:rotate(5deg) scale(1);opacity:1}to{transform:rotate(0deg) scale(.82);opacity:0}}"}</style>
+        <div aria-hidden="true" style={{position:"absolute",width:"min(280px,calc(100% - 64px))",height:"min(322px,calc(100% - 112px))",background:"#F4D35E",borderRadius:28,animation:logoutClosing?"logoutBackingOut .3s ease-in both":"logoutBackingIn .72s cubic-bezier(.22,1,.36,1) both"}} />
+        <div onClick={e=>e.stopPropagation()} style={{position:"relative",background:"#FFFFFF",borderRadius:28,padding:"18px 22px",maxWidth:320,width:"100%",textAlign:"center",boxShadow:"0 18px 40px rgba(15,14,11,.3)",animation:logoutClosing?"logoutPopupReverse .3s ease-in both":"logoutPopupSpring .72s cubic-bezier(.22,1,.36,1) both"}}>
+          <button onClick={closeLogoutConfirm} aria-label="Close logout dialog" style={{position:"absolute",top:12,right:14,width:28,height:28,background:"none",border:"none",fontSize:22,cursor:"pointer"}}>×</button>
+          <video src="/goodbye-lolo.webm" autoPlay loop muted playsInline preload="auto" aria-label="Goodbye animation" style={{display:"block",width:150,height:118,objectFit:"contain",margin:"0 auto 2px"}} />
+          <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:18,color:"#17191B",marginBottom:9}}>Leaving already?</div>
+          <div style={{fontSize:12.5,color:"#596269",lineHeight:1.55,margin:"0 auto 20px",maxWidth:260}}>Come back soon. There’s always more to discover and earn.</div>
+          <div style={{display:"flex",justifyContent:"center",gap:10}}><button onClick={closeLogoutConfirm} style={{minWidth:88,background:"#FFFFFF",border:"1.5px solid #17191B",borderRadius:999,padding:"10px 17px",fontFamily:FONT_HEAD,fontWeight:700,cursor:"pointer"}}>Cancel</button><button onClick={()=>{setShowLogoutConfirm(false);onLogout();}} style={{minWidth:88,background:"#E53935",border:"1.5px solid #C62828",borderRadius:999,padding:"10px 17px",fontFamily:FONT_HEAD,fontWeight:800,color:"#FFFFFF",cursor:"pointer"}}>Log out</button></div>
+        </div>
+      </div>}
+
+      {!communityProfileOpen && !spaceCoinsScreen && (
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", zIndex: 100, background: T.card, opacity: Math.max(0, 1 - navSlide / 92), transform: `translate3d(0, ${navSlide}px, 0)`, pointerEvents: navSlide > 80 ? "none" : "auto", willChange: "transform, opacity", transition: "none", borderTop: `1px solid ${T.cardBorder}`, boxShadow: "0 -8px 24px rgba(0,0,0,0.12)", display: "flex", justifyContent: "space-around", padding: "6px 0 calc(20px + env(safe-area-inset-bottom))", "--rx-logo-bg": isDark ? "#000" : "#fff" }}>
+          {[
+            { key: "home", label: "Home", icon: (active) => (
+               <NavAssetIcon kind="home" active={active} />
+            )},
+            { key: "wallet", label: "Wallet", icon: (active) => (
+              <NavAssetIcon kind="wallet" active={active} />
+            )},
+            { key: "space-coins", center: true },
+            { key: "community", label: "Community", icon: (active) => (
+              <NavAssetIcon kind="community" active={active} />
+            )},
+            { key: "more", label: "More", icon: (active) => (
+              <svg width="24" height="24" viewBox="0 0 24 24" fill={active ? "url(#rxNavGold)" : "none"} stroke={active ? "none" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="4" width="6" height="6" rx="1.2"/>
+                <rect x="14" y="4" width="6" height="6" rx="1.2"/>
+                <rect x="4" y="14" width="6" height="6" rx="1.2"/>
+                <rect x="14" y="14" width="6" height="6" rx="1.2"/>
+              </svg>
+            )},
+          ].map(({ key, label, icon, center }) => {
+            // "More" only highlights on its landing menu (morePage === null).
+            // Inside a More sub-page (profile/security/wallet/settings) nothing highlights.
+            const insideMoreSub = tab === "more" && morePage;
+            const active = !profileFromHeader && !insideMoreSub && tab === key;
+            return (
+              center ? (
+                <CenterNavLogo
+                  key={key}
+                  active={active}
+                  onActivate={() => { setProfileFromHeader(false); setSpaceCoinsScreen("intro"); }}
+                />
+              ) : (
+                <button key={key} onClick={() => { if (key === "more") setMorePage(null); setProfileFromHeader(false); goTab(key); }} style={{ position: "relative", background: "none", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, color: active ? T.gold : T.muted, cursor: "pointer", minWidth: 52, padding: "4px 2px", transition: "color 0.15s" }}>
+                  {/* Shared deep-gold gradient used to fill active nav icons (fills the icon shape, not a box) */}
+                  <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
+                    <defs>
+                      <linearGradient id="rxNavGold" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stopColor="#F4D35E"/>
+                        <stop offset="50%" stopColor="#F4D35E"/>
+                        <stop offset="100%" stopColor="#F4D35E"/>
+                      </linearGradient>
+                    </defs>
+                  </svg>
+                  {icon(active)}
+                  {navBadges[key] && <span className="rx-nav-badge">{navBadges[key]}</span>}
+                  <span style={{ fontSize: 11, fontFamily: FONT_HEAD, fontWeight: active ? 700 : 500, letterSpacing: 0.1, color: active ? T.gold : T.muted }}>{label}</span>
+                </button>
+              )
+            );
+          })}
+        </div>
+      )}
+      {spaceCoinsScreen === "intro" && (
+        <SpaceCoinsIntro
+          T={T}
+          onExplore={() => {
+            setSpaceCoinsScreen("dashboard");
+            routeWrite("space-coins", "dashboard", null);
+          }}
+          onBack={() => {
+            setSpaceCoinsScreen(null);
+            setTab("home");
+            routeWrite("home", null, null);
+          }}
+        />
+      )}
+      {spaceCoinsScreen === "dashboard" && (
+        <SpaceCoinsDashboard
+          T={T}
+          onBack={() => {
+            setSpaceCoinsScreen("intro");
+            routeWrite("space-coins", "intro", null);
+          }}
+        />
+      )}
+      </div>
+    </PullToRefresh>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Candlestick chart — swipeable, MT5-style, black & blue colour scheme
+// ─────────────────────────────────────────────────────────────────────────────
+let isDarkCanvas = false;
+function setIsDarkCanvas(v) { isDarkCanvas = v; }
+
+function CandlestickChart({ candles, overlays, inst, containerHeight = 260 }) {
+  const canvasRef = useRef(null);
+  const rafRef    = useRef(null);
+  const [panOffset, setPanOffset] = React.useState(0);
+  const touchX   = useRef(null);
+  const touchOff = useRef(0);
+  const VISIBLE  = 55; // max candles shown at once
+
+  const onTouchStart = e => {
+    touchX.current   = e.touches[0].clientX;
+    touchOff.current = panOffset;
+  };
+  const onTouchMove = e => {
+    if (touchX.current === null) return;
+    const dx    = touchX.current - e.touches[0].clientX; // positive → see older
+    const delta = Math.round(dx / 4.5);
+    const maxOff = Math.max(0, candles.length - VISIBLE);
+    setPanOffset(Math.max(0, Math.min(maxOff, touchOff.current + delta)));
+  };
+  const onTouchEnd = () => { touchX.current = null; };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || candles.length < 4) return;
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      const dpr = window.devicePixelRatio || 1;
+      const W   = canvas.offsetWidth  || 340;
+      const H   = canvas.offsetHeight || containerHeight;
+      canvas.width  = W * dpr;
+      canvas.height = H * dpr;
+      const ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, W, H);
+
+      // Visible window
+      const endIdx   = Math.max(VISIBLE, candles.length - panOffset);
+      const startIdx = Math.max(0, endIdx - VISIBLE);
+      const vis      = candles.slice(startIdx, endIdx);
+      if (vis.length < 2) return;
+
+      const pad = { top: 10, bottom: 22, left: 2, right: 66 };
+      const cW  = W - pad.left - pad.right;
+      const cH  = H - pad.top  - pad.bottom;
+
+      // Price range — use ONLY candle prices so SL/TP never compresses the candle area
+      const allP = vis.flatMap(c => [c.high, c.low]);
+      const rawMin = Math.min(...allP), rawMax = Math.max(...allP);
+      // Taller candles: use 8% margin so candles fill the chart area
+      const mg  = (rawMax - rawMin) * 0.08;
+      const minP = rawMin - mg, maxP = rawMax + mg;
+      const pR   = maxP - minP || 1;
+      const toY  = p => pad.top  + cH - ((p - minP) / pR) * cH;
+      const gap  = cW / vis.length;
+      const bW   = Math.max(2, gap * 0.72);
+      const toX  = i => pad.left + i * gap + gap / 2;
+
+      // Colours — modern black & blue
+      const BULL  = "#1D6FE8";
+      const BEAR  = isDarkCanvas ? "#bfc4ce" : "#131722";
+      const WBULL = "#1D6FE8";
+      const WBEAR = isDarkCanvas ? "#9ca3af" : "#374151";
+      const GRID  = isDarkCanvas ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.065)";
+      const TLBL  = isDarkCanvas ? "rgba(220,225,235,0.55)" : "rgba(18,18,42,0.5)";
+      const GOLD  = T.gold || "#F4D35E";
+
+      // ── Dashed horizontal grid lines ─────────────────────────────────────
+      ctx.setLineDash([3, 4]); ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+      for (let i = 1; i <= 5; i++) {
+        const gy = pad.top + (cH / 6) * i;
+        ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(W - pad.right, gy); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      // ── Label anti-overlap helper ─────────────────────────────────────────
+      const usedY = [];
+      const fits  = (y, h = 14) => usedY.every(r => Math.abs(r.y - y) > (r.h + h) / 2 + 3);
+      const grab  = (y, h = 14) => { usedY.push({ y, h }); };
+
+      // ── Draw overlays ─────────────────────────────────────────────────────
+      // Support zone (blue tint)
+      overlays.forEach(o => {
+        if (o.type !== "support_zone") return;
+        const y1 = toY(o.priceHigh), y2 = toY(o.priceLow), midY = (y1 + y2) / 2;
+        ctx.fillStyle = "rgba(29,111,232,0.07)";
+        ctx.fillRect(pad.left, y1, cW, y2 - y1);
+        ctx.strokeStyle = "rgba(29,111,232,0.3)"; ctx.lineWidth = 1; ctx.setLineDash([]);
+        ctx.strokeRect(pad.left, y1, cW, y2 - y1);
+        if (fits(midY)) {
+          ctx.fillStyle = BULL; ctx.font = "bold 8px sans-serif";
+          ctx.fillText("Support Zone", pad.left + 5, midY + 3); grab(midY);
+        }
+        // right pill
+        if (fits(midY + 0.1, 20)) {
+          ctx.fillStyle = BULL;
+          roundRect(ctx, W - pad.right + 2, midY - 9, pad.right - 3, 18, 3); ctx.fill();
+          ctx.fillStyle = "#fff"; ctx.font = "bold 7.5px sans-serif"; ctx.textAlign = "center";
+          ctx.fillText(o.priceLow.toFixed(Math.min(inst.digits, 2)), W - pad.right / 2, midY + 3);
+          ctx.textAlign = "left"; grab(midY, 20);
+        }
+      });
+
+      // Resistance (red dashed line)
+      overlays.forEach(o => {
+        if (o.type !== "resistance") return;
+        const y = toY(o.price);
+        ctx.beginPath(); ctx.strokeStyle = "#ef4444"; ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+        ctx.setLineDash([]);
+        const lY = y - 6;
+        if (fits(lY, 10)) {
+          ctx.fillStyle = "#ef4444"; ctx.font = "bold 8px sans-serif";
+          ctx.fillText(o.label || "Resistance Zone", pad.left + 5, lY); grab(lY, 10);
+        }
+        if (fits(y, 20)) {
+          ctx.fillStyle = "#ef4444";
+          roundRect(ctx, W - pad.right + 2, y - 9, pad.right - 3, 18, 3); ctx.fill();
+          ctx.fillStyle = "#fff"; ctx.font = "bold 7.5px sans-serif"; ctx.textAlign = "center";
+          ctx.fillText(o.price.toFixed(Math.min(inst.digits, 2)), W - pad.right / 2, y + 3);
+          ctx.textAlign = "left"; grab(y, 20);
+        }
+      });
+
+      // Trendline (gold dashed diagonal)
+      overlays.forEach(o => {
+        if (o.type !== "trendline") return;
+        const x2 = Math.min(toX(vis.length - 6), W - pad.right - 10);
+        ctx.beginPath(); ctx.strokeStyle = GOLD; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.moveTo(pad.left, toY(o.price1)); ctx.lineTo(x2, toY(o.price2)); ctx.stroke();
+        ctx.setLineDash([]);
+        const lY = toY(o.price2) - 7;
+        if (fits(lY, 10)) {
+          ctx.fillStyle = GOLD; ctx.font = "bold 8px sans-serif";
+          ctx.fillText("Uptrend Line", pad.left + 5, lY); grab(lY, 10);
+        }
+      });
+
+      // Entry zone (gold shaded)
+      overlays.forEach(o => {
+        if (o.type !== "entry_zone") return;
+        const y1 = toY(o.priceHigh), y2 = toY(o.priceLow);
+        ctx.fillStyle = "rgba(244,211,94,0.09)";
+        ctx.fillRect(pad.left, y1, cW, y2 - y1);
+        [y1, y2].forEach(y => {
+          ctx.beginPath(); ctx.strokeStyle = GOLD; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+          ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+          ctx.setLineDash([]);
+        });
+      });
+
+      // Current price crosshair (gold dashed + pill)
+      overlays.forEach(o => {
+        if (o.type !== "current_price") return;
+        const y = toY(o.price);
+        ctx.beginPath(); ctx.strokeStyle = GOLD; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke(); ctx.setLineDash([]);
+        if (fits(y, 20)) {
+          ctx.fillStyle = GOLD;
+          roundRect(ctx, W - pad.right + 2, y - 9, pad.right - 3, 18, 3); ctx.fill();
+          ctx.fillStyle = isDarkCanvas ? "#000" : "#fff";
+          ctx.font = "bold 7.5px sans-serif"; ctx.textAlign = "center";
+          ctx.fillText(o.price.toFixed(Math.min(inst.digits, 2)), W - pad.right / 2, y + 3);
+          ctx.textAlign = "left"; grab(y, 20);
+        }
+      });
+
+      // AI Projection arrow + annotation
+      overlays.forEach(o => {
+        if (o.type !== "projection") return;
+        const lastX = toX(vis.length - 1);
+        const lastY = toY(vis[vis.length - 1]?.close || o.target);
+        const endX  = Math.min(lastX + gap * 4, W - pad.right - 12);
+        const endY  = toY(o.target);
+        ctx.beginPath(); ctx.strokeStyle = BULL; ctx.lineWidth = 2; ctx.setLineDash([]);
+        ctx.moveTo(lastX, lastY);
+        ctx.bezierCurveTo(lastX + (endX - lastX) * 0.5, lastY, lastX + (endX - lastX) * 0.5, endY, endX, endY);
+        ctx.stroke();
+        ctx.fillStyle = BULL; ctx.beginPath();
+        ctx.moveTo(endX, endY); ctx.lineTo(endX - 7, endY - 4); ctx.lineTo(endX - 7, endY + 4);
+        ctx.closePath(); ctx.fill();
+        // annotation box — try below arrow, then above if it would clip
+        const boxW = 84, boxH = 38;
+        const bx = Math.max(pad.left + 4, Math.min(endX - boxW + 10, W - pad.right - boxW - 2));
+        let by = endY + 7;
+        if (by + boxH > H - pad.bottom - 2) by = endY - boxH - 7;
+        if (fits(by + boxH / 2, boxH)) {
+          const bgFill = isDarkCanvas ? "rgba(20,30,55,0.93)" : "rgba(235,244,255,0.96)";
+          ctx.fillStyle = bgFill; ctx.strokeStyle = "rgba(29,111,232,0.4)"; ctx.lineWidth = 1;
+          roundRect(ctx, bx, by, boxW, boxH, 5); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = BULL; ctx.font = "bold 7.5px sans-serif";
+          ctx.fillText("AI Projection", bx + 5, by + 12);
+          ctx.fillStyle = TLBL; ctx.font = "7px sans-serif";
+          ["Price expected to reach", "next resistance zone."].forEach((l, li) =>
+            ctx.fillText(l, bx + 5, by + 21 + li * 9)
+          );
+          grab(by + boxH / 2, boxH);
+        }
+      });
+
+      // ── SL / TP labeled lines (always drawn, clipped to chart area) ──────
+      overlays.forEach(o => {
+        const drawHLine = (price, color, lbl) => {
+          const rawY = pad.top + cH - ((price - minP) / pR) * cH;
+          // Clamp to chart area with a small label band
+          const y = Math.max(pad.top + 8, Math.min(H - pad.bottom - 8, rawY));
+          const isClipped = rawY < pad.top + 8 || rawY > H - pad.bottom - 8;
+          ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+          ctx.setLineDash(isClipped ? [2, 2] : [5, 3]);
+          ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+          ctx.setLineDash([]);
+          if (fits(y, 18)) {
+            ctx.fillStyle = color;
+            roundRect(ctx, W - pad.right + 2, y - 9, pad.right - 3, 18, 3); ctx.fill();
+            ctx.fillStyle = "#fff"; ctx.font = "bold 6.5px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText(lbl + " " + price.toFixed(Math.min(inst.digits || 2, 2)), W - pad.right / 2, y + 3);
+            ctx.textAlign = "left"; grab(y, 18);
+          }
+        };
+        if (o.type === "sl_level" && o.price) drawHLine(o.price, "#ef4444", "SL");
+        if (o.type === "tp_level" && o.price) drawHLine(o.price, "#22c55e", "TP");
+        if (o.type === "entry_zone" && o.priceLow) drawHLine(o.priceLow, GOLD, "Entry");
+      });
+
+      // ── Draw candles (both bull and bear are FILLED) ──────────────────────
+      vis.forEach((c, i) => {
+        const x  = toX(i);
+        const bull = c.close >= c.open;
+        const yO = toY(c.open), yC = toY(c.close), yH = toY(c.high), yL = toY(c.low);
+        // Wick
+        ctx.beginPath(); ctx.strokeStyle = bull ? WBULL : WBEAR; ctx.lineWidth = 1;
+        ctx.moveTo(x, yH); ctx.lineTo(x, yL); ctx.stroke();
+        // Body — filled solid
+        const top = Math.min(yO, yC);
+        const bh  = Math.max(1.5, Math.abs(yO - yC));
+        ctx.fillStyle = bull ? BULL : BEAR;
+        ctx.fillRect(x - bW / 2, top, bW, bh);
+      });
+
+      // ── Price axis labels (right column) ─────────────────────────────────
+      ctx.fillStyle = TLBL; ctx.font = "8.5px sans-serif"; ctx.textAlign = "right";
+      const nL = 5;
+      for (let i = 0; i <= nL; i++) {
+        const p = minP + (pR / nL) * i, y = toY(p);
+        if (y < pad.top + 6 || y > H - pad.bottom - 2) continue;
+        ctx.fillText(p.toFixed(Math.min(inst.digits, 2)), W - pad.right - 3, y + 3);
+      }
+
+      // ── Time axis labels (bottom) ─────────────────────────────────────────
+      ctx.textAlign = "center"; ctx.font = "8px sans-serif"; ctx.fillStyle = TLBL;
+      const tStep = Math.max(1, Math.floor(vis.length / 5));
+      vis.forEach((c, i) => {
+        if (i % tStep !== 0) return;
+        const d   = new Date(c.t);
+        const lbl = `${d.getHours().toString().padStart(2,"0")}:${d.getMinutes().toString().padStart(2,"0")}`;
+        const x   = toX(i);
+        if (x < 18 || x > W - pad.right - 8) return;
+        ctx.fillText(lbl, x, H - 5);
+      });
+      ctx.textAlign = "left";
+
+      // ── Pan progress bar (small indicator when panned back) ──────────────
+      if (panOffset > 0 && candles.length > VISIBLE) {
+        const ratio = (candles.length - VISIBLE - panOffset) / (candles.length - VISIBLE);
+        const bLen  = Math.max(30, cW * 0.22);
+        const bX    = pad.left + (cW - bLen) * (1 - Math.max(0, Math.min(1, ratio)));
+        ctx.fillStyle = "rgba(29,111,232,0.32)";
+        roundRect(ctx, bX, H - pad.bottom + 5, bLen, 3, 1.5); ctx.fill();
+      }
+    });
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [candles, overlays, inst, panOffset]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{ width:"100%", height:"100%", display:"block", touchAction:"none" }}
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+    />
+  );
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y); ctx.arcTo(x+w, y, x+w, y+r, r);
+  ctx.lineTo(x + w, y + h - r); ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x + r, y + h); ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y + r); ctx.arcTo(x, y, x+r, y, r);
+  ctx.closePath();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Add Market bottom sheet — supports add, replace when full, and manage active
+// ─────────────────────────────────────────────────────────────────────────────
+function DurationPicker({ asset, onSelect, onClose }) {
+  return (
+    <div style={{ display:"none" }}>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Format seconds → HH:MM:SS
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtTime(secs) {
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  if (h > 0) return `${h}:${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
+  return `${m.toString().padStart(2,"0")}:${s.toString().padStart(2,"0")}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+function GamesTab() {
+  return null;
+  /*
+  const [activeCategory, setActiveCategory] = React.useState("All Games");
+  const [activeRainaState, setActiveRainaState] = React.useState(0);
+  const [pageReady, setPageReady] = React.useState(false);
+  const categories = ["All Games", "Trending", "Strategy", "Duel", "Quick Play"];
+  const games = [
+    { title: "MoonJet", subtitle: "Fly high. Aim higher.", image: gamesMoonJet },
+    { title: "Trader Duel", subtitle: "Battle traders in real-time", image: gamesTraderDuel },
+    { title: "Bull vs Bear", subtitle: "Who controls the market?", image: gamesBullBear },
+    { title: "Golden Vault", subtitle: "The richest vault in crypto", image: gamesGoldenVault },
+    { title: "Raina AI Challenge", subtitle: "Can you outsmart the AI?", image: gamesRainaAI, wide: true },
+  ];
+  const players = [
+    { name: "TradeMaster", avatar: gamesAvatar1, score: "214,500", trend: "up" },
+    { name: "KwameX", avatar: gamesAvatar2, score: "189,200", trend: "up", isMe: true },
+    { name: "LunaPlay", avatar: gamesAvatar3, score: "145,800", trend: "down" },
+    { name: "Abena_G", avatar: gamesAvatar4, score: "112,400", trend: "up" },
+  ];
+  const rainaStates = ["Analyzing market...", "Calculating odds...", "Ready to play"];
+  const visibleGames = games;
+
+  React.useEffect(() => {
+    const readyTimer = setTimeout(() => setPageReady(true), 40);
+    const interval = setInterval(() => setActiveRainaState(prev => (prev + 1) % rainaStates.length), 2500);
+    return () => { clearTimeout(readyTimer); clearInterval(interval); };
+  }, []);
+
+  return (
+    <div style={{ minHeight: "100dvh", background: "#050505", color: "#FFFFFF", fontFamily: FONT_BODY, overflow: "hidden" }}>
+      <style>{`
+        @keyframes games-fade-up { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes games-fade-in { from { opacity:0; } to { opacity:1; } }
+        @keyframes games-scale-in { from { opacity:0; transform:scale(.82); } to { opacity:1; transform:scale(1); } }
+        @keyframes games-pulse-ring {
+          0% { transform:scale(.95); box-shadow:0 0 0 0 rgba(244,211,94,.7); }
+          70% { transform:scale(1); box-shadow:0 0 0 10px rgba(244,211,94,0); }
+          100% { transform:scale(.95); box-shadow:0 0 0 0 rgba(244,211,94,0); }
+        }
+        @keyframes games-shimmer { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+        .games-reveal { opacity:0; animation:games-fade-up .6s ease-out forwards; }
+        .games-fade { opacity:0; animation:games-fade-in .7s ease-out forwards; }
+        .games-scroll-hide::-webkit-scrollbar { display:none; }
+        .games-scroll-hide { scrollbar-width:none; -ms-overflow-style:none; }
+      `}</style>
+
+      <header style={{ position: "sticky", top: 0, zIndex: 20, background: "rgba(5,5,5,.82)", backdropFilter: "blur(14px)", borderBottom: "1px solid rgba(244,211,94,.2)", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ color: T.gold, fontSize: 20 }}>✦</span>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18, color: "#FFFFFF" }}>RainX</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 999, background: "#1C1913", border: `1px solid ${T.cardBorder}`, boxShadow: `0 0 15px ${T.gold}33` }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "#FFFFFF" }}>GHS 4,320.00</span>
+          <span style={{ width: 18, height: 18, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", background: `${T.gold}22`, color: T.goldBright, fontSize: 16, lineHeight: 1 }}>+</span>
+        </div>
+      </header>
+
+      <section style={{ position: "relative", height: 400, display: "flex", flexDirection: "column", justifyContent: "flex-end", padding: "0 20px 30px", overflow: "hidden", borderRadius: "0 0 32px 32px" }}>
+        <div style={{ position: "absolute", inset: 0 }}>
+          <div style={{ position: "absolute", inset: 0, zIndex: 1, background: "linear-gradient(to top, #050505, rgba(5,5,5,.45) 58%, rgba(5,5,5,.3))" }} />
+          <div style={{ position: "absolute", inset: 0, zIndex: 1, background: "linear-gradient(to bottom, rgba(5,5,5,.45), transparent 35%)" }} />
+          <img src={gamesHeroRocket} alt="Gold rocket launching" style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center" }} />
+          <div style={{ position: "absolute", inset: 0, zIndex: 2, opacity: .25, background: "radial-gradient(circle at 50% 50%, rgba(244,211,94,.15), transparent 45%)", animation: "games-shimmer 15s linear infinite" }} />
+        </div>
+        <div className={pageReady ? "games-fade" : ""} style={{ position: "relative", zIndex: 3, textAlign: "center" }}>
+          <h1 style={{ fontFamily: FONT_HEAD, fontSize: 38, lineHeight: 1.05, fontWeight: 800, color: "#FFFFFF", margin: "0 0 8px", textShadow: `0 0 14px ${T.gold}66` }}>Play Smart.<br />Win More.</h1>
+          <p style={{ color: `${T.goldBright}CC`, fontSize: 13, fontWeight: 600, margin: "0 auto 22px", maxWidth: 280 }}>The premium gaming platform for serious players</p>
+          <button onClick={() => document.getElementById("games-trending")?.scrollIntoView({ behavior: "smooth", block: "start" })} style={{ border: "none", borderRadius: 999, padding: "14px 28px", background: T.goldGradient, color: "#050505", fontFamily: FONT_HEAD, fontSize: 12, fontWeight: 800, letterSpacing: 1, cursor: "pointer", boxShadow: `0 0 24px ${T.gold}55` }}>
+            Enter Games <span style={{ marginLeft: 6 }}>▶</span>
+          </button>
+        </div>
+      </section>
+
+      <div className="games-scroll-hide" style={{ width: "100%", padding: "20px 16px 8px", overflowX: "auto" }}>
+        <div style={{ display: "flex", gap: 8, minWidth: "max-content" }}>
+          {categories.map(category => {
+            const active = activeCategory === category;
+            return (
+              <button key={category} onClick={() => setActiveCategory(category)} style={{ position: "relative", border: active ? "none" : `1px solid ${T.cardBorder}`, borderRadius: 999, padding: "8px 16px", background: active ? T.gold : "#1C1913", color: active ? "#050505" : "#9C947F", fontFamily: FONT_HEAD, fontSize: 11, fontWeight: 700, cursor: "pointer", transition: "all .25s", boxShadow: active ? `0 0 15px ${T.gold}55` : "none" }}>
+                {category}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section className="games-reveal" style={{ animationDelay: ".15s", padding: "12px 16px 4px" }}>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18, color: "#FFFFFF", marginBottom: 12 }}>Featured</div>
+        <div style={{ position: "relative", height: 200, borderRadius: 16, overflow: "hidden", border: `1px solid ${T.cardBorder}`, cursor: "pointer" }}>
+          <img src={gamesMoonJet} alt="MoonJet" style={{ width: "100%", height: "100%", objectFit: "cover", transition: "transform .7s" }} />
+          <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(5,5,5,.94), rgba(5,5,5,.25) 65%, transparent)" }} />
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", alignItems: "flex-start", padding: 18 }}>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 28, color: "#fff" }}>MoonJet</div>
+            <div style={{ color: T.goldBright, fontSize: 12, fontWeight: 600, margin: "3px 0 14px" }}>Fly high. Aim higher.</div>
+            <button style={{ border: "none", borderRadius: 999, padding: "9px 18px", background: T.gold, color: "#050505", fontFamily: FONT_HEAD, fontSize: 11, fontWeight: 800, cursor: "pointer" }}>Play Now</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="games-trending" style={{ padding: "18px 16px 4px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 18, color: "#FFFFFF" }}>Trending Games</div>
+          <span style={{ color: T.muted, fontSize: 11 }}>{visibleGames.length} games</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+          {visibleGames.map((game, index) => (
+            <div key={game.title} className="games-reveal" style={{ animationDelay: `${.2 + index * .1}s`, position: "relative", gridColumn: game.wide ? "span 2" : undefined, aspectRatio: game.wide ? "2.5 / 1" : "4 / 5", borderRadius: 14, overflow: "hidden", border: `1px solid ${T.cardBorder}`, background: "#1C1913", cursor: "pointer", transition: "transform .25s, box-shadow .25s" }}>
+              <img src={game.image} alt={game.title} loading="lazy" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", transition: "transform .7s" }} />
+              <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to top, rgba(5,5,5,.94), rgba(5,5,5,.1) 70%)" }} />
+              <div style={{ position: "absolute", left: 12, right: 12, bottom: 12 }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: game.wide ? 16 : 13, color: "#fff" }}>{game.title}</div>
+                <div style={{ color: `${T.goldBright}B3`, fontSize: 10, marginTop: 3 }}>{game.subtitle}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section style={{ position: "relative", marginTop: 24, padding: "48px 20px 42px", borderTop: `1px solid ${T.gold}22`, borderBottom: `1px solid ${T.gold}22`, overflow: "hidden" }}>
+        <div style={{ position: "absolute", inset: 0, backgroundColor: "#0A0A0A", opacity: .94 }} />
+        <div style={{ position: "absolute", inset: 0, opacity: .1, backgroundImage: "url(\"data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none'%3E%3Cg fill='%23C9A84C'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E)" }} />
+        <div style={{ position: "absolute", width: 260, height: 260, borderRadius: "50%", background: `${T.gold}18`, filter: "blur(80px)", top: "50%", left: "50%", transform: "translate(-50%,-50%)" }} />
+        <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div className="games-reveal" style={{ animationDelay: ".1s", textAlign: "center", marginBottom: 30 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 6 }}>
+              <BrainCircuit size={20} color={T.gold} />
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 24, color: T.gold, textShadow: `0 0 10px ${T.gold}88` }}>Meet Raina AI</div>
+            </div>
+            <div style={{ color: T.muted, fontSize: 13 }}>Your smartest opponent yet</div>
+          </div>
+          <div className="games-reveal" style={{ animationDelay: ".25s", position: "relative", marginBottom: 30 }}>
+            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", animation: "games-pulse-ring 2s infinite" }} />
+            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", animation: "games-pulse-ring 2s infinite", animationDelay: "1s" }} />
+            <div style={{ position: "relative", width: 132, height: 132, padding: 4, borderRadius: "50%", border: `2px solid ${T.gold}80`, background: "#0A0A0A", boxShadow: `0 0 30px ${T.gold}4D`, overflow: "hidden" }}>
+              <img src={gamesRainaAI} alt="Raina AI" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }} />
+            </div>
+            <div style={{ position: "absolute", bottom: -12, left: "50%", transform: "translateX(-50%)", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999, background: "#1C1913", border: `1px solid ${T.gold}4D`, boxShadow: "0 4px 12px rgba(0,0,0,.5)" }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: T.gold, animation: "pulse 1.5s infinite" }} />
+              <span style={{ color: "#FFFFFF", fontSize: 10, fontWeight: 600 }}>{rainaStates[activeRainaState]}</span>
+            </div>
+          </div>
+          <div className="games-reveal" style={{ animationDelay: ".4s", position: "relative", maxWidth: 280, marginBottom: 22, padding: 16, borderRadius: 18, background: "rgba(28,25,19,.82)", border: `1px solid ${T.cardBorder}`, backdropFilter: "blur(8px)" }}>
+            <div style={{ position: "absolute", top: -8, left: "50%", width: 16, height: 16, background: "#1C1913", borderTop: `1px solid ${T.cardBorder}`, borderLeft: `1px solid ${T.cardBorder}`, transform: "translateX(-50%) rotate(45deg)" }} />
+            <div style={{ position: "relative", color: "#FFFFFF", textAlign: "center", fontSize: 14, lineHeight: 1.45, fontWeight: 600, fontStyle: "italic" }}>"I've studied 2.4M trades. Your move, human."</div>
+          </div>
+          <div className="games-reveal" style={{ animationDelay: ".55s", width: "100%", maxWidth: 300, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ padding: 12, borderRadius: 12, background: "rgba(15,14,11,.55)", border: `1px solid ${T.cardBorder}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, color: T.muted, fontSize: 12, fontWeight: 700 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Cpu size={13} /> Win Rate</span>
+                <span style={{ color: T.goldBright }}>68.4%</span>
+              </div>
+              <div style={{ height: 7, borderRadius: 999, overflow: "hidden", background: "#332C1F" }}><div style={{ height: "100%", width: pageReady ? "68.4%" : "0%", background: T.gold, transition: "width 1.5s .8s ease-out" }} /></div>
+            </div>
+            <button style={{ width: "100%", padding: "14px 20px", borderRadius: 12, background: "#1C1913", border: `1px solid ${T.gold}80`, color: T.goldBright, fontFamily: FONT_HEAD, fontSize: 15, fontWeight: 800, cursor: "pointer", boxShadow: `0 0 15px ${T.gold}26` }}>Challenge Raina</button>
+          </div>
+        </div>
+      </section>
+
+      <section style={{ padding: "28px 16px 14px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 20, color: "#FFFFFF" }}>Live Leaderboard</div>
+          <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#E05252", animation: "pulse 1.5s infinite" }} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+          {players.map((player, index) => {
+            const rank = index + 1;
+            return (
+              <div key={player.name} className="games-reveal" style={{ animationDelay: `${.1 + index * .1}s`, display: "flex", alignItems: "center", justifyContent: "space-between", padding: 12, borderRadius: 16, border: `1px solid ${player.isMe ? `${T.gold}4D` : T.cardBorder}`, background: player.isMe ? `${T.gold}0D` : "#1C1913" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: rank === 1 ? T.gold : "#1C1913", border: rank > 1 ? `1px solid ${T.cardBorder}` : "none", color: rank === 1 ? "#050505" : T.muted, fontSize: 12, fontWeight: 800 }}>{rank}</div>
+                  <img src={player.avatar} alt={player.name} style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", border: `1px solid ${T.cardBorder}` }} />
+                  <div><div style={{ color: "#FFFFFF", fontSize: 13, fontWeight: 700 }}>{player.name}{player.isMe && <span style={{ marginLeft: 6, padding: "2px 5px", borderRadius: 4, background: T.gold, color: "#050505", fontSize: 8, fontWeight: 800 }}>YOU</span>}</div><div style={{ color: T.muted, fontSize: 10, marginTop: 3 }}>Level {25 - rank * 2}</div></div>
+                </div>
+                <div style={{ textAlign: "right" }}><div style={{ color: T.goldBright, fontFamily: "monospace", fontSize: 12, fontWeight: 800 }}><span style={{ color: T.muted, fontSize: 9, marginRight: 4 }}>GHS</span>{player.score}</div><div style={{ color: player.trend === "up" ? "#34D399" : "#F87171", fontSize: 10, marginTop: 4, fontWeight: 700 }}>{player.trend === "up" ? "↗ +2.4%" : "↘ -1.2%"}</div></div>
+              </div>
+            );
+          })}
+        </div>
+        <button style={{ width: "100%", marginTop: 16, padding: 12, border: "none", background: "none", color: T.gold, fontFamily: FONT_HEAD, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>View Full Rankings <ChevronRight size={15} style={{ verticalAlign: "middle" }} /></button>
+      </section>
+    </div>
+  );
+}
+*/
+}
+
+// Homepage is maintained in ./HomeTab.jsx. Keep a single source of truth so the legacy inline HomeTab cannot reappear.
+function Row({ label, value, color }) {
+  return <div style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"4px 0" }}><span style={{ color:T.muted, fontWeight:500 }}>{label}</span><span style={{ color:color||T.paper, fontWeight:700, fontVariantNumeric:"tabular-nums" }}>{value}</span></div>;
+}
+
+
+// ---------- Mini sparkline (Binance-style) ----------
+function MiniSparkline({ data = [], width = 72, height = 30 }) {
+  if (!data || data.length < 2) return <div style={{ width, height }} />;
+  const prices = data.map(d => d.price).filter(p => isFinite(p));
+  if (prices.length < 2) return <div style={{ width, height }} />;
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || max * 0.001 || 1;
+  const pts = prices.map((p, i) => {
+    const x = (i / (prices.length - 1)) * width;
+    const y = height - ((p - min) / range) * (height - 2) - 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const isUp = prices[prices.length - 1] >= prices[0];
+  const lineColor = isUp ? "#1D6FE8" : "#B0604A";
+  return (
+    <svg width={width} height={height} style={{ display: "block", overflow: "visible" }}>
+      <polyline points={pts} fill="none" stroke={lineColor} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ---------- Markets tab ----------
+function MarketsTab({ seriesMap, signalsMap, activeSymbol, onSelect, themeMode }) {
+  const [fullChartInst, setFullChartInst] = useState(null);
+  const [marketCandles, setMarketCandles] = useState({});
+
+  // Markets previews use the same broker candle feed as Home and Full Chart.
+  // Do not render the seeded tick series here: it can drift from the real OHLC.
+  // Poll every 10s — was fetching once on mount only ([] deps), so these
+  // mini charts never updated after first load and looked permanently static.
+  useEffect(() => {
+    let cancelled = false;
+    const loadAll = () => {
+      Promise.all(INSTRUMENTS.map(async (inst) => {
+        try {
+          const res = await fetch(`/api/candles?symbol=${encodeURIComponent(inst.symbol)}&interval=15m&limit=24`);
+          if (!res.ok) return null;
+          const data = await res.json();
+          const values = (data.values || []).slice().reverse().map(c => ({
+            t: new Date(c.datetime || c.time || 0).getTime(),
+            open: +c.open, high: +c.high, low: +c.low, close: +c.close,
+          })).filter(c => c.t > 0 && isFinite(c.open));
+          return [inst.symbol, values];
+        } catch {
+          return null;
+        }
+      })).then(entries => {
+        if (cancelled) return;
+        setMarketCandles(Object.fromEntries(entries.filter(Boolean)));
+      });
+    };
+    loadAll();
+    const id = setInterval(loadAll, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  return (
+    <div style={{ padding: 16 }}>
+      {/* Full-screen chart overlay for a specific instrument */}
+      {fullChartInst && (
+        <FullChartErrorBoundary onClose={() => setFullChartInst(null)}>
+          <FullChartView
+            inst={fullChartInst}
+            session={null}
+            signalsMap={signalsMap}
+            themeMode={themeMode || "dark"}
+            onClose={() => setFullChartInst(null)}
+          />
+        </FullChartErrorBoundary>
+      )}
+      <div style={{ fontFamily: FONT_HEAD, fontSize: 18, color: T.paper, fontWeight: 800, marginBottom: 12 }}>Market</div>
+      {INSTRUMENTS.map((i) => {
+        const arr = seriesMap[i.symbol] || [];
+        const price = arr.length ? arr[arr.length - 1].price : 0;
+        const prevPrice = arr.length > 1 ? arr[0].price : price;
+        const changePct = prevPrice ? ((price - prevPrice) / prevPrice) * 100 : 0;
+        const isUp = changePct >= 0;
+        const open = isMarketOpen(i.cls);
+        const combo = signalsMap[i.symbol] || {};
+        return (
+          <div key={i.symbol} style={{ background: T.card, border: `1px solid ${i.symbol === activeSymbol ? "#F4D35E" : T.cardBorder}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8, color: T.paper, boxShadow: i.symbol === activeSymbol ? "0 0 0 1px #F4D35E, 0 0 12px rgba(244,211,94,0.25)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {/* Left: name + symbol + signals — tap to go to home */}
+              <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => onSelect(i.symbol)}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: T.paper }}>{i.name}</div>
+                <div style={{ fontSize: 10, color: T.muted, fontWeight: 500 }}>{i.symbol}</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                  {TIMEFRAMES.map((tf) => {
+                    const sig = combo[tf.key];
+                    if (!sig || sig.bias === "hold" || sig.status !== "active") return null;
+                    return (
+                      <div key={tf.key} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: T.muted }}>
+                        <span>{tf.label}:</span><BiasChip bias={sig.bias} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* Center: same lightweight-charts renderer as Home */}
+              <div style={{ flexShrink: 0, width: 88, height: 42, overflow: "hidden", pointerEvents: "none", borderRadius: 6, background: T.card }}>
+                <LightweightChart
+                  candles={marketCandles[i.symbol] || []}
+                  inst={i}
+                  containerHeight={42}
+                  compact
+                  isDark={T.ink === "#0F0E0B"}
+                  bgColor={T.card}
+                />
+              </div>
+              {/* Right: price, change, status, full chart button */}
+              <div style={{ textAlign: "right", flexShrink: 0, minWidth: 80 }}>
+                <div style={{ fontFamily: FONT_HEAD, fontSize: 13, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: T.paper }}>{price ? price.toFixed(Math.min(i.digits, 5)) : "—"}</div>
+                <div style={{ fontSize: 10, fontWeight: 600, color: isUp ? T.sage : T.rust }}>
+                  {isUp ? "▲" : "▼"} {Math.abs(changePct).toFixed(2)}%
+                </div>
+                <div style={{ fontSize: 10, color: open ? T.sage : T.rust, fontWeight: 500, marginTop: 1 }}>{open ? "Open" : "Closed"}</div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setFullChartInst(i); }}
+                  style={{ marginTop: 5, background: "transparent", border: `1px solid ${T.paper}55`, borderRadius: 6, padding: "3px 9px", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 9.5, color: T.paper, cursor: "pointer" }}
+                >
+                  Full Chart ↗
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- Chat tab (Raina) ----------
+function ChatTab({ inst, analysis, last, account }) {
+  const storageKey = `rainx:chat:${account?.email || "guest"}:${inst.symbol}`;
+  const [messages, setMessages] = useState(null);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const recognitionRef = useRef(null);
+
+  const SpeechRecognitionCtor = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await storageGet(storageKey, false);
+        setMessages(res ? JSON.parse(res.value) : [{ role: "assistant", text: `Hi, I'm Raina. Ask me anything about ${inst.name} — e.g. "should I enter now?"` }]);
+      } catch {
+        setMessages([{ role: "assistant", text: `Hi, I'm Raina. Ask me anything about ${inst.name} — e.g. "should I enter now?"` }]);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storageKey]);
+
+  const persist = async (list) => { try { await storageSet(storageKey, JSON.stringify(list), false); } catch {} };
+
+  const send = async (overrideText) => {
+    const text = (overrideText ?? input).trim();
+    if (!text || busy || !messages) return;
+    const next = [...messages, { role: "user", text }];
+    setMessages(next); persist(next);
+    setInput(""); setBusy(true);
+    const context = analysis
+      ? `${inst.name} (${inst.symbol}) current price ${last.toFixed(inst.digits)}. Latest read: ${analysis.bias} bias, ${analysis.confidence}% confidence, entry ${analysis.entry}, SL ${analysis.stop_loss}, TP1 ${analysis.take_profit_1}, TP2 ${analysis.take_profit_2}, risk ${analysis.risk_level}, timeframe ${analysis.timeframe}. Reason: ${analysis.reason}`
+      : `${inst.name} (${inst.symbol}) current price ${last.toFixed(inst.digits)}. No fresh analysis available yet.`;
+    const reply = await askRaina(next, context);
+    const withReply = [...next, { role: "assistant", text: reply }];
+    setMessages(withReply); persist(withReply);
+    setBusy(false);
+  };
+
+  const toggleRecording = () => {
+    if (!SpeechRecognitionCtor) return;
+    if (recording) { recognitionRef.current && recognitionRef.current.stop(); setRecording(false); return; }
+    const rec = new SpeechRecognitionCtor();
+    rec.lang = "en-US";
+    rec.continuous = false;
+    rec.interimResults = false;
+    rec.onresult = (e) => { const transcript = e.results[0][0].transcript; send(transcript); };
+    rec.onend = () => setRecording(false);
+    rec.onerror = () => setRecording(false);
+    recognitionRef.current = rec;
+    setRecording(true);
+    rec.start();
+  };
+
+  if (!messages) return <div style={{ padding: 16, color: T.muted, fontSize: 13 }}>Loading conversation…</div>;
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", height: "calc(100vh - 200px)" }}>
+      <div style={{ fontFamily: FONT_HEAD, fontSize: 18, color: T.goldBright, fontWeight: 800, marginBottom: 10 }}>Raina — {inst.symbol}</div>
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, marginBottom: 10 }}>
+        {messages.map((m, idx) => (
+          <div key={idx} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? T.gold : T.card, color: m.role === "user" ? T.ink : T.paper, border: m.role === "user" ? "none" : `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "8px 12px", maxWidth: "85%", fontSize: 12.5, lineHeight: 1.5, fontWeight: 500 }}>{m.text}</div>
+        ))}
+        {busy && <div style={{ color: T.muted, fontSize: 12, fontWeight: 500 }}>Raina is thinking…</div>}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={recording ? "Listening…" : "Should I enter now?"} style={{ ...getInputStyle() }} />
+        <button onClick={toggleRecording} disabled={!SpeechRecognitionCtor} title={SpeechRecognitionCtor ? "Voice input" : "Voice input not supported in this browser"} style={{ background: recording ? T.rust : T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "0 12px", cursor: SpeechRecognitionCtor ? "pointer" : "not-allowed", opacity: SpeechRecognitionCtor ? 1 : 0.4 }}>
+          {recording ? <Square size={16} color="#fff" /> : <Mic size={16} color={T.paper} />}
+        </button>
+        <button onClick={() => send()} disabled={busy} style={{ background: T.gold, border: "none", borderRadius: 8, padding: "0 14px", cursor: "pointer" }}><Send size={16} color={T.ink} /></button>
+      </div>
+      <div style={{ fontSize: 10, color: T.muted, marginTop: 8, textAlign: "center", fontWeight: 500 }}>
+        {SpeechRecognitionCtor ? "Tap the mic to talk · " : ""}Your conversation history is saved to this account and instrument.
+      </div>
+    </div>
+  );
+}
+
+// ---------- More tab ----------
+const SAMPLE_CALENDAR = [
+  { time: "13:30 UTC", currency: "USD", impact: "High", event: "Non-Farm Payrolls" },
+  { time: "14:00 UTC", currency: "EUR", impact: "Medium", event: "ECB Rate Decision" },
+  { time: "18:00 UTC", currency: "USD", impact: "High", event: "FOMC Statement" },
+  { time: "01:30 UTC", currency: "JPY", impact: "Low", event: "Trade Balance" },
+];
+// ---------- Trade history ----------
+function HistoryTab({ account, entitlement, onSubscribe }) {
+  const [rows, setRows] = useState(null);
+
+  useEffect(() => {
+    if (!account?.id) { setRows([]); return; }
+    (async () => {
+      const { data } = await supabase.from("trade_history").select("*").eq("user_id", account.id).order("closed_at", { ascending: false }).limit(100);
+      setRows(data || []);
+    })();
+  }, [account?.id]);
+
+  if (rows === null) return <div style={{ padding: 16, color: T.muted, fontSize: 13 }}>Loading history…</div>;
+
+  const wins = rows.filter((r) => r.result === "tp").length;
+  const losses = rows.filter((r) => r.result === "sl").length;
+  const netPoints = rows.reduce((sum, r) => sum + Number(r.points), 0);
+  const unlocked = hasAccess(entitlement.tier, "weekly");
+
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ fontFamily: FONT_HEAD, fontSize: 18, color: T.paper, fontWeight: 800, marginBottom: 12 }}>Trade History</div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        {[["Closed trades", rows.length], ["Wins", wins], ["Losses", losses], ["Net points", netPoints]].map(([l, v]) => (
+          <div key={l} style={{ flex: 1, background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, padding: 8, textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: T.muted }}>{l}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.paper }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      <BlurGate unlocked={unlocked} requiredLabel="Weekly" onSubscribe={onSubscribe} minHeight={200}>
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 12, color: T.muted }}>No closed trades yet. This fills in automatically once a signal hits Take Profit or Stop Loss.</div>
+      ) : (
+        rows.map((r) => (
+          <div key={r.id} style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, padding: 12, marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: r.direction === "buy" ? T.sage : T.rust }}>{r.symbol} · {r.direction.toUpperCase()} · {r.timeframe}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: r.result === "tp" ? T.sage : T.rust }}>{r.result === "tp" ? "🎯 TP" : "⛔ SL"} {r.points >= 0 ? "+" : ""}{r.points}</div>
+            </div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginTop: 4 }}>Entry {r.entry} · SL {r.stop_loss} · TP {r.take_profit}</div>
+            {r.reason && <div style={{ fontSize: 11, color: T.paper, marginTop: 4, lineHeight: 1.5 }}>{r.reason}</div>}
+            <div style={{ fontSize: 10, color: T.muted, marginTop: 4 }}>{new Date(r.closed_at).toLocaleString()}</div>
+          </div>
+        ))
+      )}
+      </BlurGate>
+    </div>
+  );
+}
+
+
+// ---------- Scalping ----------
+    // Frontend for the existing Raina AI scalping engine (Python/FastAPI on Railway). No engine logic duplicated.
+    // No signal-generation, lot-sizing, or trade-execution logic lives here.
+    // User identity: stable integer derived from Supabase UUID used as telegram_id.
+    function webUserId(supabaseId) {
+    const hex = (supabaseId || "").replace(/-/g, "").slice(0, 9);
+    return Math.abs(parseInt(hex, 16) % 1_000_000_000) || 1;
+    }
+
+const SCALP_SYMBOLS = [
+  { group: "Forex",       symbols: ["EURUSD","GBPUSD","USDJPY","XAUUSD","USDCHF","AUDUSD","USDCAD","NZDUSD"] },
+  { group: "Crypto",      symbols: ["BTCUSDT","ETHUSDT","DOGEUSD","SOLUSD","XRPUSDT"] },
+  { group: "Commodities", symbols: ["USOIL","SILVER","COPPER"] },
+];
+    function ScalpingTab({ account, entitlement, onSubscribe }) {
+      const unlocked = hasAccess(entitlement.tier, "weekly");
+
+      const [mt5, setMt5] = useState(null);
+      const [rSettings, setRSettings] = useState(null);
+      // Initialize phase synchronously from localStorage so the UI never blocks on a network call
+      const [phase, setPhase] = useState(() => lsGet("rainx-mt5-uid") ? "loading" : "setup");
+      const [apiKey, setApiKey] = useState(null);
+      const [mode, setMode] = useState("demo");
+      const [scalpMode, setScalpMode] = useState("smart");
+      const [signals, setSignals] = useState([]);
+      const [holdSignal, setHoldSignal] = useState(null); // HOLD state: market not ready
+      const [trades, setTrades] = useState([]);
+      const [perf, setPerf] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [balanceSyncing, setBalanceSyncing] = useState(false);
+      const [err, setErr] = useState("");
+      const [saved, setSaved] = useState(false);
+      const [showKey, setShowKey] = useState(false);
+      const [sigLoading, setSigLoading] = useState(false);
+      const [smartAlert, setSmartAlert] = useState(null);
+      const [riskOpen, setRiskOpen] = useState(false);
+      const [localS, setLocalS] = useState({ risk_percent: 1.0, max_open_trades: 3, min_confidence: 70.0, daily_loss_limit: 5.0 });
+      const [connectMethod, setConnectMethod] = useState("metaapi");
+      const [mt5Login, setMt5Login] = useState("");
+      const [mt5Password, setMt5Password] = useState("");
+      const [mt5Server, setMt5Server] = useState("");
+      const [mt5UserId, setMt5UserId] = useState(() => lsGet("rainx-mt5-uid") || "");
+      const [selectedSymbol, setSelectedSymbol] = useState(() => lsGet("rainx-scalp-sym") || "XAUUSD");
+      const [symbolSearch, setSymbolSearch] = useState("");
+      const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
+      const [pendingScalpMode, setPendingScalpMode] = useState(null);
+      const lastFiredSignalRef = useRef("");
+      const lastSmartSignalRef = useRef("");
+
+      const signalConfidence = (sig) => Math.round(Number(sig?.confidence) || 0);
+      const signalKey = (sig) => [sig?.asset, sig?.direction, sig?.confidence, sig?.entry_zone?.[0], sig?.stop_loss, sig?.take_profit?.[0]].join("|");
+      const money = (value) => {
+        const number = Number(value) || 0;
+        return number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      };
+      const price = (value) => {
+        if (value == null || value === "") return "—";
+        const number = Number(value);
+        if (!Number.isFinite(number)) return String(value);
+        return number >= 100 ? number.toFixed(2) : number.toFixed(5);
+      };
+      const getTopSignal = (items) => items.reduce((top, item) => signalConfidence(item) > signalConfidence(top) ? item : top, null);
+
+      const loadTrades = useCallback(async (uid) => {
+        const id = uid || mt5UserId;
+        if (!id) return;
+        try {
+          const r = await fetch(`/api/mt5/trades/${id}`);
+          if (r.ok) {
+            const d = await r.json();
+            setTrades(Array.isArray(d) ? d : (d.trades || []));
+          }
+        } catch {}
+      }, [mt5UserId]);
+
+      const loadPerf = useCallback(async (uid) => {
+        const id = uid || mt5UserId;
+        if (!id) return;
+        try {
+          const r = await fetch(`/api/mt5/performance/${id}`);
+          if (r.ok) setPerf(await r.json());
+        } catch {}
+      }, [mt5UserId]);
+
+      const loadSignals = useCallback(async (sym) => {
+        const target = sym || selectedSymbol;
+        if (!target) return;
+        setSigLoading(true);
+        try {
+          // Quick Scalp uses the velocity/momentum endpoint — always returns BUY or SELL.
+          // Smart Scalp uses the setup-based endpoint — may return HOLD.
+          const url = scalpMode === "quick"
+            ? `/api/signals/quick/${target}`
+            : `/api/signals/scalp/${target}?timeframe=5m`;
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`Signal service returned ${r.status}`);
+          const d = await r.json();
+          const raw = Array.isArray(d) ? d : Array.isArray(d?.signals) ? d.signals : d?.signal ? [d.signal] : d && typeof d === "object" ? [d] : [];
+          const actionable = raw
+            .filter((s) => s && s.direction && s.direction !== "HOLD")
+            .sort((a, b) => signalConfidence(b) - signalConfidence(a))
+            .slice(0, 6);
+          // Capture HOLD signal so Smart Scalp can explain why it's waiting
+          const hold = raw.find((s) => s && (s.direction === "HOLD" || !s.direction));
+          setSignals(actionable);
+          setHoldSignal(actionable.length === 0 && scalpMode !== "quick" ? (hold || null) : null);
+          setErr("");
+        } catch (e) {
+          setSignals([]);
+          setHoldSignal(null);
+          setErr(e.message || "Unable to load signals right now.");
+        } finally {
+          setSigLoading(false);
+        }
+      }, [selectedSymbol, scalpMode]);
+
+      const handleSyncBalance = useCallback(async () => {
+        if (!mt5UserId || balanceSyncing) return;
+        setBalanceSyncing(true);
+        try {
+          await fetch(`/api/mt5/balance/refresh/${mt5UserId}`, { method: "POST" });
+          // Poll every 15 s for up to 3 minutes to detect when balance arrives
+          let attempts = 0;
+          const poll = setInterval(async () => {
+            attempts++;
+            await loadAccount(mt5UserId);
+            if (attempts >= 12) clearInterval(poll);
+          }, 15000);
+          setTimeout(() => setBalanceSyncing(false), 180000);
+        } catch {
+          setBalanceSyncing(false);
+        }
+      }, [mt5UserId, balanceSyncing]);
+
+      const loadAccount = useCallback(async (uid) => {
+        const id = uid || mt5UserId;
+        if (!id) return;
+        try {
+          // Fetch account + settings in parallel to cut load time in half
+          const [r, sr] = await Promise.all([
+            fetch(`/api/mt5/account/${id}`),
+            fetch(`/api/mt5/settings/${id}`),
+          ]);
+          if (r.status === 404) { setPhase("setup"); setMt5(null); return; }
+          if (!r.ok) { setPhase("setup"); return; }
+          const data = await r.json();
+          const accountData = data?.account || data?.data || data;
+          // Normalise balance field — MetaAPI can return it at different paths
+          const balance = accountData?.balance ?? accountData?.account_balance ?? accountData?.free_margin ?? 0;
+          setMt5({ ...accountData, balance });
+          if (accountData?.api_key) setApiKey(accountData.api_key);
+          let settings = null;
+          if (sr.ok) {
+            const settingsData = await sr.json();
+            settings = settingsData?.settings || settingsData;
+            setRSettings(settings);
+            setLocalS({
+              risk_percent: settings?.risk_percent ?? 1.0,
+              max_open_trades: settings?.max_open_trades ?? 3,
+              min_confidence: settings?.min_confidence ?? 70.0,
+              daily_loss_limit: settings?.daily_loss_limit ?? 5.0,
+            });
+          }
+          if (settings?.scalping_enabled) {
+            setPhase("active");
+            loadTrades(id);
+            loadPerf(id);
+          } else {
+            setPhase("connected");
+          }
+        } catch {
+          setPhase("setup");
+        }
+      }, [mt5UserId, loadTrades, loadPerf]);
+
+      useEffect(() => {
+        if (!unlocked) { setPhase("setup"); return; }
+        if (!mt5UserId) { setPhase("setup"); return; }
+        loadAccount();
+        const accountPoll = setInterval(loadAccount, 30_000);
+        return () => clearInterval(accountPoll);
+      }, [unlocked, mt5UserId, loadAccount]);
+
+      useEffect(() => {
+        if (phase !== "active" || !selectedSymbol || !mt5UserId) return;
+        loadSignals(selectedSymbol);
+        const interval = scalpMode === "quick" ? 30_000 : 60_000;
+        const signalPoll = setInterval(() => loadSignals(selectedSymbol), interval);
+        return () => clearInterval(signalPoll);
+      }, [phase, selectedSymbol, mt5UserId, scalpMode, loadSignals]);
+
+      useEffect(() => {
+        if (phase !== "active" || scalpMode !== "quick" || !mt5UserId) return;
+        const top = getTopSignal(signals);
+        if (!top || signalConfidence(top) < 50) return;
+        const key = signalKey(top);
+        if (!key || key === lastFiredSignalRef.current) return;
+        lastFiredSignalRef.current = key;
+        fetch("/api/mt5/scalping/execute", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ user_id: mt5UserId, symbol: top.asset, direction: top.direction, confidence: signalConfidence(top), mode: "quick", stop_loss: top.stop_loss ?? null, take_profit: Array.isArray(top.take_profit) ? (top.take_profit[0] ?? null) : (top.take_profit ?? null) }),
+        }).then(async (r) => {
+          if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.detail || `Quick Scalp failed (${r.status})`);
+          }
+          loadTrades();
+          loadPerf();
+        }).catch((e) => {
+          lastFiredSignalRef.current = "";
+          setErr(e.message || "Quick Scalp could not execute the signal.");
+        });
+      }, [signals, phase, scalpMode, mt5UserId, loadTrades, loadPerf]);
+
+      useEffect(() => {
+        if (phase !== "active" || scalpMode !== "smart") return;
+        const top = getTopSignal(signals);
+        if (!top || signalConfidence(top) < 60) return;
+        const key = signalKey(top);
+        if (!key || key === lastSmartSignalRef.current) return;
+        lastSmartSignalRef.current = key;
+        setSmartAlert(top);
+      }, [signals, phase, scalpMode]);
+
+      const handleConnect = async () => {
+        setBusy(true); setErr("");
+        const uid = mt5Login.trim();
+        if (connectMethod === "metaapi") {
+          if (!uid) { setErr("MT5 login number is required"); setBusy(false); return; }
+          if (!mt5Password.trim()) { setErr("MT5 password is required"); setBusy(false); return; }
+          if (!mt5Server.trim()) { setErr("Broker server is required — find it in MT5 Help → About"); setBusy(false); return; }
+          setMt5UserId(uid);
+          lsSet("rainx-mt5-uid", uid);
+          try {
+            const r = await fetch("/api/mt5/connect/metaapi", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ mt5_login: uid, mt5_password: mt5Password.trim(), mt5_server: mt5Server.trim(), account_mode: mode, name: "RainX User" }),
+            });
+            const raw = await r.text();
+            let d = {};
+            try { d = JSON.parse(raw); } catch {}
+            if (d.api_key) setApiKey(d.api_key);
+            if (!r.ok) {
+              const existing = await fetch(`/api/mt5/account/${uid}`);
+              if (existing.ok) { await loadAccount(uid); setBusy(false); return; }
+              throw new Error(d.detail || d.error || (raw.length < 200 ? raw : `Server error ${r.status}`));
+            }
+          } catch (e) {
+            try {
+              const existing = await fetch(`/api/mt5/account/${uid}`);
+              if (existing.ok) { await loadAccount(uid); setBusy(false); return; }
+            } catch {}
+            setErr(e.message || "Unable to connect MT5"); setBusy(false); return;
+          }
+          await loadAccount(uid);
+        } else {
+          // EA Desktop mode — create account record, return api_key for EA installation
+          try {
+            const r = await fetch("/api/mt5/connect/ea", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ mt5_login: uid || "", account_mode: mode }),
+            });
+            if (!r.ok) throw new Error(`Error ${r.status}`);
+            const d = await r.json();
+            setApiKey(d.api_key);
+            const resolvedUid = d.user_id || uid;
+            if (resolvedUid) { setMt5UserId(resolvedUid); lsSet("rainx-mt5-uid", resolvedUid); }
+            setPhase("pending");
+          } catch (e) { setErr(e.message || "Unable to create EA connection"); }
+        }
+        setBusy(false);
+      };
+
+      const handleSaveSettings = async () => {
+        setBusy(true); setErr("");
+        try {
+          const r = await fetch("/api/mt5/settings", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ user_id: mt5UserId, ...localS, scalping_enabled: rSettings?.scalping_enabled ?? false }),
+          });
+          if (!r.ok) throw new Error(`Error ${r.status}`);
+          setSaved(true);
+          setTimeout(() => setSaved(false), 2200);
+          await loadAccount();
+        } catch (e) { setErr(e.message || "Unable to save settings"); }
+        setBusy(false);
+      };
+
+      const handleToggle = async () => {
+        setBusy(true); setErr("");
+        try {
+          const r = await fetch("/api/mt5/scalping/toggle", {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ user_id: mt5UserId }),
+          });
+          if (!r.ok) throw new Error(`Error ${r.status}`);
+          await loadAccount();
+        } catch (e) { setErr(e.message || "Unable to update scalping"); }
+        setBusy(false);
+      };
+
+      const handleExecuteSignal = async (sig) => {
+        if (!sig || !mt5UserId) return;
+        setBusy(true); setErr("");
+        try {
+          const r = await fetch("/api/mt5/scalping/execute", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ user_id: mt5UserId, symbol: sig.asset, direction: sig.direction, confidence: signalConfidence(sig), stop_loss: sig.stop_loss ?? null, take_profit: Array.isArray(sig.take_profit) ? (sig.take_profit[0] ?? null) : (sig.take_profit ?? null) }),
+          });
+          if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            throw new Error(d.detail || `Smart Scalp failed (${r.status})`);
+          }
+          setSmartAlert(null);
+          lastSmartSignalRef.current = signalKey(sig);
+          await Promise.all([loadTrades(), loadPerf()]);
+        } catch (e) { setErr(e.message || "Smart Scalp could not execute the signal."); }
+        setBusy(false);
+      };
+
+      const disconnect = () => {
+        lsSet("rainx-mt5-uid", "");
+        lsSet("rainx-scalp-sym", "");
+        setMt5UserId("");
+        setSelectedSymbol("");
+        setMt5(null); setRSettings(null); setSignals([]); setTrades([]); setPerf(null); setSmartAlert(null); setApiKey(null);
+        lastFiredSignalRef.current = "";
+        lastSmartSignalRef.current = "";
+        setPhase("setup");
+      };
+
+      const Disclaimer = () => (
+        <div style={{ padding: "12px 14px", background: `${T.rust}15`, border: `1px solid ${T.rust}33`, borderRadius: 14, marginTop: 14 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, color: T.muted, lineHeight: 1.7 }}>
+            <ShieldCheck size={16} color={T.rust} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span><strong style={{ color: T.rust }}>Risk Disclaimer</strong> — Automated scalping involves significant risk of loss. Short-timeframe trading amplifies exposure. Only use a dedicated account with capital you can afford to lose. Past performance does not guarantee future results.</span>
+          </div>
+        </div>
+      );
+
+      const RiskForm = () => (
+        <div>
+          {[
+            { key: "risk_percent", label: "Risk per trade (%)", min: 0.1, max: 5, step: 0.1 },
+            { key: "max_open_trades", label: "Max simultaneous trades", min: 1, max: 10, step: 1 },
+            { key: "min_confidence", label: "Min confidence (%)", min: 50, max: 95, step: 1 },
+            { key: "daily_loss_limit", label: "Daily loss limit (%)", min: 1, max: 20, step: 0.5 },
+          ].map(({ key, label, min, max, step }) => (
+            <div key={key} style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 13.5, color: T.muted }}>{label}</span>
+                <span style={{ fontSize: 13.5, color: T.paper, fontFamily: FONT_HEAD, fontWeight: 700 }}>{localS[key]}</span>
+              </div>
+              <input type="range" min={min} max={max} step={step} value={localS[key]} onChange={e => setLocalS(p => ({ ...p, [key]: parseFloat(e.target.value) }))} style={{ width: "100%", accentColor: T.gold }} />
+            </div>
+          ))}
+          {err && <div style={{ fontSize: 13.5, color: T.rust, marginBottom: 8, lineHeight: 1.5 }}>{err}</div>}
+          <button onClick={handleSaveSettings} disabled={busy} style={{ width: "100%", background: saved ? T.sage : T.goldGradient, color: T.ink, border: "none", borderRadius: 12, padding: "11px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15, cursor: busy ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
+            {saved ? "Saved" : busy ? "Saving…" : "Save Settings"}
+          </button>
+        </div>
+      );
+
+      const RiskSettings = () => (
+        <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, marginBottom: 16, overflow: "hidden" }}>
+          <button onClick={() => setRiskOpen(v => !v)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "none", border: "none", color: T.paper, padding: "14px 16px", cursor: "pointer", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14.5, transition: "all 0.2s" }}>
+            <span>Risk Settings</span>
+            <ChevronRight size={18} color={T.muted} style={{ transform: riskOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
+          </button>
+          {riskOpen && <div style={{ borderTop: `1px solid ${T.cardBorder}`, padding: "14px 16px 16px" }}>{RiskForm()}</div>}
+        </div>
+      );
+
+      const SignalCard = ({ sig }) => {
+        const confidence = signalConfidence(sig);
+        const isBuy = sig.direction === "BUY";
+        const DirectionIcon = isBuy ? TrendingUp : TrendingDown;
+        return (
+          <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: 14, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                <div style={{ width: 34, height: 34, borderRadius: 10, display: "grid", placeItems: "center", background: `${T.gold}18`, color: T.paper, flexShrink: 0 }}><DirectionIcon size={18} /></div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15.5, color: T.paper }}>{sig.asset || "—"}</div>
+                  <div style={{ fontSize: 12, color: T.muted, marginTop: 3 }}>{sig.timeframe || "5m"} timeframe</div>
+                </div>
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 12.5, color: T.paper, border: `1px solid ${T.cardBorder}`, borderRadius: 6, padding: "3px 7px" }}>{sig.direction}</div>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: T.paper, marginTop: 5 }}>{confidence}%</div>
+              </div>
+            </div>
+            <div style={{ height: 4, background: `${T.muted}25`, borderRadius: 99, overflow: "hidden", margin: "13px 0 14px" }}><div style={{ width: `${Math.min(100, Math.max(0, confidence))}%`, height: "100%", background: confidence >= 70 ? T.goldBright : T.gold, borderRadius: 99, transition: "all 0.2s" }} /></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 8 }}>
+              <div><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>Entry</div><div style={{ fontSize: 13, color: T.paper, fontWeight: 600 }}>{sig.entry_zone ? `${price(sig.entry_zone[0])}–${price(sig.entry_zone[1])}` : price(sig.entry)}</div></div>
+              <div><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>SL</div><div style={{ fontSize: 13, color: T.paper, fontWeight: 600 }}>{price(sig.stop_loss)}</div></div>
+              <div><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>TP1</div><div style={{ fontSize: 13, color: T.paper, fontWeight: 600 }}>{price(sig.take_profit?.[0] ?? sig.take_profit)}</div></div>
+            </div>
+            <div style={{ display: "flex", gap: 14, marginTop: 13, paddingTop: 10, borderTop: `1px solid ${T.cardBorder}`, fontSize: 12, color: T.muted }}>
+              <span>RR {sig.risk_reward_ratio != null ? `${sig.risk_reward_ratio}:1` : "—"}</span>
+              <span>Risk {sig.risk_level || "—"}</span>
+            </div>
+          </div>
+        );
+      };
+
+      const SymbolPicker = () => {
+        const allSyms = SCALP_SYMBOLS.flatMap(g => g.symbols.map(s => ({ s, g: g.group })));
+        const filtered = symbolSearch ? allSyms.filter(({ s }) => s.includes(symbolSearch.toUpperCase())) : null;
+        const choose = (symbol) => { setSelectedSymbol(symbol); lsSet("rainx-scalp-sym", symbol); setSymbolSearch(""); };
+        return (
+          <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14.5, color: T.paper, marginBottom: 10 }}>Select Market</div>
+            <input type="text" placeholder="Search symbol" value={symbolSearch} onChange={e => setSymbolSearch(e.target.value)} style={{ width: "100%", background: T.ink, border: `1px solid ${T.cardBorder}`, borderRadius: 9, color: T.paper, fontSize: 14, padding: "9px 12px", fontFamily: FONT_BODY, outline: "none", boxSizing: "border-box", marginBottom: 12 }} />
+            {filtered ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{filtered.map(({ s }) => <button key={s} onClick={() => choose(s)} style={{ padding: "7px 12px", borderRadius: 8, fontSize: 13, fontFamily: FONT_HEAD, fontWeight: 700, cursor: "pointer", background: selectedSymbol === s ? T.gold : T.ink, color: selectedSymbol === s ? T.ink : T.muted, border: `1px solid ${selectedSymbol === s ? T.gold : T.cardBorder}`, transition: "all 0.2s" }}>{s}</button>)}{filtered.length === 0 && <div style={{ fontSize: 13, color: T.muted }}>No symbols match.</div>}</div>
+            ) : SCALP_SYMBOLS.map(({ group, symbols }) => (
+              <div key={group} style={{ marginBottom: 10 }}><div style={{ fontSize: 11.5, color: T.muted, fontFamily: FONT_HEAD, fontWeight: 700, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>{group}</div><div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{symbols.map(sym => <button key={sym} onClick={() => choose(sym)} style={{ padding: "7px 12px", borderRadius: 8, fontSize: 13, fontFamily: FONT_HEAD, fontWeight: 700, cursor: "pointer", background: selectedSymbol === sym ? T.gold : T.ink, color: selectedSymbol === sym ? T.ink : T.muted, border: `1px solid ${selectedSymbol === sym ? T.gold : T.cardBorder}`, transition: "all 0.2s" }}>{sym}</button>)}</div></div>
+            ))}
+            {selectedSymbol && <div style={{ marginTop: 5, fontSize: 12.5, color: T.paper, fontFamily: FONT_HEAD, fontWeight: 700 }}>{selectedSymbol} selected</div>}
+          </div>
+        );
+      };
+
+      const ModeToggle = () => (
+        <>
+          <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: 5, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 16 }}>
+            {[{ key: "quick", label: "Quick Scalp", hint: "Enters immediately", Icon: Zap }, { key: "smart", label: "Smart Scalp", hint: "Waits for setup", Icon: Activity }].map(({ key, label, hint, Icon }) => (
+              <button key={key} onClick={() => {
+                if (scalpMode === key) return;
+                if (phase === "active") {
+                  // Require confirmation before switching while scalping is live
+                  setPendingScalpMode(key);
+                } else {
+                  setScalpMode(key); setSmartAlert(null);
+                }
+              }} style={{ display: "flex", alignItems: "center", gap: 9, textAlign: "left", background: scalpMode === key ? `${T.gold}20` : "transparent", color: scalpMode === key ? T.goldBright : T.muted, border: scalpMode === key ? `1px solid ${T.gold}66` : "1px solid transparent", borderRadius: 10, padding: "10px 9px", cursor: "pointer", transition: "all 0.2s" }}>
+                <Icon size={17} />
+                <span><span style={{ display: "block", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 12.5 }}>{label}</span><span style={{ display: "block", fontSize: 10.5, marginTop: 2, color: T.muted }}>{hint}</span></span>
+              </button>
+            ))}
+          </div>
+          {/* Mode-switch confirmation (shown only when scalping is active) */}
+          {pendingScalpMode && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 20, padding: "24px 20px", maxWidth: 340, width: "100%" }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 17, color: T.paper, marginBottom: 8 }}>Switch to {pendingScalpMode === "quick" ? "Quick" : "Smart"} Scalp?</div>
+                <div style={{ fontSize: 13.5, color: T.muted, lineHeight: 1.6, marginBottom: 20 }}>
+                  {pendingScalpMode === "quick"
+                    ? "Quick Scalp enters trades automatically as soon as a signal fires. Switching now will change how new signals are handled — existing open trades are not affected."
+                    : "Smart Scalp alerts you before each trade so you can approve or dismiss it. Switching now will stop automatic entries — you must confirm each signal manually."}
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => setPendingScalpMode(null)} style={{ flex: 1, background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper, cursor: "pointer" }}>Cancel</button>
+                  <button onClick={() => { setScalpMode(pendingScalpMode); setSmartAlert(null); setPendingScalpMode(null); }} style={{ flex: 1, background: T.goldGradient, border: "none", borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13.5, color: T.ink, cursor: "pointer" }}>Switch</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      );
+
+      // ── SparkLine: decorative direction-aware SVG chart ──
+      const SparkLine = ({ direction = "HOLD", width = 120, height = 44 }) => {
+        const pts = direction === "BUY"
+          ? [0.78, 0.72, 0.68, 0.60, 0.55, 0.42, 0.38, 0.28, 0.20, 0.12]
+          : direction === "SELL"
+          ? [0.18, 0.22, 0.28, 0.24, 0.38, 0.42, 0.36, 0.52, 0.62, 0.76]
+          : [0.52, 0.45, 0.55, 0.48, 0.52, 0.46, 0.54, 0.50, 0.46, 0.52];
+        const col = direction === "BUY" ? T.sage : direction === "SELL" ? T.rust : T.muted;
+        const step = width / (pts.length - 1);
+        const linePath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${(p * height).toFixed(1)}`).join(" ");
+        const fillPath = linePath + ` L${width},${height} L0,${height} Z`;
+        const uid = `sp-${direction}-${width}`;
+        return (
+          <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block", overflow: "visible" }}>
+            <defs>
+              <linearGradient id={uid} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={col} stopOpacity="0.25" />
+                <stop offset="100%" stopColor={col} stopOpacity="0.02" />
+              </linearGradient>
+            </defs>
+            <path d={fillPath} fill={`url(#${uid})`} />
+            <path d={linePath} fill="none" stroke={col} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        );
+      };
+
+      // ── HeroCard: large top card ──
+      const HeroCard = ({ active }) => {
+        const topSig = signals.length > 0 ? getTopSignal(signals) : null;
+        const direction = topSig?.direction || null;
+        const confidence = topSig ? signalConfidence(topSig) : 0;
+        const bal = mt5?.balance ?? mt5?.account_balance ?? mt5?.equity ?? 0;
+        const currency = mt5?.currency || rSettings?.account_currency || "USD";
+        const pnl = Number(perf?.total_profit) || 0;
+        const pnlPositive = pnl >= 0;
+        const balanceZero = !bal || Number(bal) === 0;
+        const isBuy = direction === "BUY";
+        const isSell = direction === "SELL";
+        const dirCol = isBuy ? T.sage : isSell ? T.rust : T.muted;
+        return (
+          <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 22, padding: "16px 16px 14px", marginBottom: 12, overflow: "hidden" }}>
+            {/* Status + broker row */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: active ? T.sage : T.muted, display: "inline-block", boxShadow: active ? `0 0 6px ${T.sage}88` : "none" }} />
+                <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12, color: active ? T.sage : T.paper }}>{active ? "Scalping Active" : "MT5 Connected"}</span>
+              </div>
+              <button onClick={() => setShowDisconnectConfirm(true)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+                <Activity size={13} color={T.paper} />
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12, color: T.paper }}>{mt5?.broker_name || "Broker"}</div>
+                  <div style={{ fontSize: 10.5, color: T.muted }}>{(mt5?.account_mode || "demo").toUpperCase()} · #{mt5?.account_number || "—"}</div>
+                </div>
+              </button>
+            </div>
+
+            {/* Main row: left (symbol + direction + chart) | divider | right (balance + P&L) */}
+            <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
+              {/* Left */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                  <span style={{ fontFamily: FONT_HEAD, fontWeight: 900, fontSize: 22, color: T.paper, letterSpacing: -0.5 }}>{selectedSymbol || "—"}</span>
+                  <span style={{ color: T.paper, fontSize: 15 }}>★</span>
+                </div>
+                {direction ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span style={{ background: `${dirCol}22`, border: `1px solid ${dirCol}66`, borderRadius: 8, padding: "4px 10px", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: dirCol }}>
+                      {direction}{isBuy ? " ↗" : isSell ? " ↘" : ""}
+                    </span>
+                    <div>
+                      <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: T.paper }}>{confidence}%</span>
+                      <span style={{ fontSize: 10.5, color: T.muted, marginLeft: 3 }}>Confidence</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>{active ? "Monitoring markets…" : "Start scalping to see signals"}</div>
+                )}
+                <div style={{ borderRadius: 10, overflow: "hidden", marginTop: 6 }}>
+                  <SparkLine direction={direction || "HOLD"} width={130} height={46} />
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div style={{ width: 1, background: T.cardBorder, alignSelf: "stretch", flexShrink: 0 }} />
+
+              {/* Right: balance + P&L */}
+              <div style={{ flexShrink: 0, minWidth: 110, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>Balance</div>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 900, fontSize: 20, color: T.paper, lineHeight: 1 }}>{money(bal)}</div>
+                  <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{currency}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>P&amp;L Today</div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                    <div>
+                      <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: pnlPositive ? T.sage : T.rust }}>
+                        {pnlPositive ? "+" : ""}{money(pnl)}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: T.muted }}>{currency}</div>
+                    </div>
+                    <button onClick={handleSyncBalance} disabled={balanceSyncing} title="Sync balance" style={{ width: 32, height: 32, borderRadius: 9, border: `1px solid ${T.cardBorder}`, background: balanceSyncing ? `${T.gold}22` : "transparent", color: balanceSyncing ? T.gold : T.muted, display: "grid", placeItems: "center", cursor: balanceSyncing ? "not-allowed" : "pointer", flexShrink: 0, transition: "all 0.2s" }}>
+                      <Activity size={15} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Balance warning strip */}
+            {balanceZero && (
+              <div style={{ marginTop: 12, background: `${T.gold}12`, border: `1px solid ${T.gold}33`, borderRadius: 9, padding: "7px 11px", fontSize: 12, color: T.muted, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span>{balanceSyncing ? "⏳ Syncing from MetaAPI…" : "Balance not yet synced."}</span>
+                {!balanceSyncing && (
+                  <button onClick={handleSyncBalance} style={{ background: "none", border: "none", color: T.gold, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0 }}>Sync now</button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      // ── ScalpModeCards: Quick + Smart side-by-side ──
+      const ScalpModeCards = () => (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          {[
+            { key: "quick", label: "Quick Scalping", hint: "Enters immediately", Icon: Zap },
+            { key: "smart", label: "Smart Scalping", hint: "Waits for better setup", Icon: Activity },
+          ].map(({ key, label, hint, Icon }) => {
+            const isActive = scalpMode === key;
+            return (
+              <button key={key} onClick={() => {
+                if (scalpMode === key) return;
+                if (phase === "active") { setPendingScalpMode(key); }
+                else { setScalpMode(key); setSmartAlert(null); }
+              }} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, textAlign: "left", background: T.card, border: `1.5px solid ${isActive ? T.gold : T.cardBorder}`, borderRadius: 18, padding: "13px 11px 13px 12px", cursor: "pointer", transition: "all 0.2s" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 11, background: `${T.gold}20`, display: "grid", placeItems: "center", flexShrink: 0 }}>
+                    <Icon size={18} color={T.paper} />
+                  </div>
+                  <div>
+                    <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 12.5, color: T.paper, lineHeight: 1.2 }}>{label}</div>
+                    <div style={{ fontSize: 10.5, color: T.muted, marginTop: 3, lineHeight: 1.3 }}>{hint}</div>
+                  </div>
+                </div>
+                <ChevronRight size={15} color={isActive ? T.gold : T.muted} style={{ flexShrink: 0 }} />
+              </button>
+            );
+          })}
+        </div>
+      );
+
+      // ── HotMarkets: horizontal scrollable signal cards ──
+      const HotMarkets = ({ onSeeAll }) => {
+        const defaultSyms = SCALP_SYMBOLS.flatMap(g => g.symbols).slice(0, 6);
+        const items = signals.length > 0
+          ? signals.slice(0, 6).map(sig => ({ sym: sig.asset, sig }))
+          : defaultSyms.map(sym => ({ sym, sig: null }));
+        const TAGS = ["Hot", "Strong", "Rising", "Active", "Watch", "Trending"];
+        const tagColor = (t) => t === "Hot" ? T.rust : t === "Strong" ? T.sage : T.gold;
+        return (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 16 }}>🔥</span>
+                <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15, color: T.paper }}>Hot Markets</span>
+              </div>
+              <button onClick={onSeeAll} style={{ display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", color: T.gold, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+                See all <ChevronRight size={14} color={T.gold} />
+              </button>
+            </div>
+
+            {/* Horizontal scroll container */}
+            <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4, scrollSnapType: "x mandatory", WebkitOverflowScrolling: "touch", msOverflowStyle: "none", scrollbarWidth: "none" }}>
+              {items.map(({ sym, sig }, i) => {
+                const dir = sig?.direction || null;
+                const conf = sig ? signalConfidence(sig) : 0;
+                const isBuy = dir === "BUY";
+                const isSell = dir === "SELL";
+                const dirCol = isBuy ? T.sage : isSell ? T.rust : T.muted;
+                const dirLabel = isBuy ? "BUY" : isSell ? "SELL" : "WAIT";
+                const tag = TAGS[i % TAGS.length];
+                const tagCol = tagColor(tag);
+                const SEG = 8;
+                const filled = Math.round((conf / 100) * SEG);
+                return (
+                  <div key={sym} style={{ flexShrink: 0, width: 172, background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 18, padding: "13px 12px 12px", scrollSnapAlign: "start" }}>
+                    {/* Symbol + tag */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <div style={{ width: 28, height: 28, borderRadius: "50%", background: `${T.gold}22`, border: `1.5px solid ${T.gold}55`, display: "grid", placeItems: "center", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 12, color: T.paper, flexShrink: 0 }}>
+                          {sym.charAt(0)}
+                        </div>
+                        <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 12, color: T.paper }}>{sym}</span>
+                      </div>
+                      {sig && <span style={{ fontSize: 10, fontWeight: 700, color: tagCol, background: `${tagCol}22`, borderRadius: 6, padding: "2px 7px", fontFamily: FONT_HEAD, flexShrink: 0 }}>{tag}</span>}
+                    </div>
+
+                    {/* Sparkline */}
+                    <div style={{ borderRadius: 8, overflow: "hidden", marginBottom: 8 }}>
+                      <SparkLine direction={dir || "HOLD"} width={148} height={48} />
+                    </div>
+
+                    {/* Direction + confidence */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+                      <span style={{ fontFamily: FONT_HEAD, fontWeight: 900, fontSize: 15, color: dirCol }}>{dirLabel}</span>
+                      <div style={{ textAlign: "right" }}>
+                        <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13.5, color: T.paper }}>{conf || "—"}%</span>
+                        <div style={{ fontSize: 9.5, color: T.muted, lineHeight: 1 }}>Confidence</div>
+                      </div>
+                    </div>
+
+                    {/* Segmented confidence bar */}
+                    <div style={{ display: "flex", gap: 2.5, marginBottom: 10 }}>
+                      {Array.from({ length: SEG }).map((_, j) => (
+                        <div key={j} style={{ flex: 1, height: 4, borderRadius: 99, background: j < filled ? dirCol : `${T.muted}33`, transition: "all 0.2s" }} />
+                      ))}
+                    </div>
+
+                    {/* Scalp Now */}
+                    <button
+                      onClick={() => {
+                        if (sig) { handleExecuteSignal(sig); }
+                        else { setSelectedSymbol(sym); lsSet("rainx-scalp-sym", sym); }
+                      }}
+                      disabled={busy}
+                      style={{ width: "100%", background: T.goldGradient, color: T.ink, border: "none", borderRadius: 10, padding: "9px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, cursor: busy ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, transition: "opacity 0.2s" }}
+                    >
+                      Scalp Now <ArrowRight size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Scroll indicator dots */}
+            {items.length > 2 && (
+              <div style={{ display: "flex", justifyContent: "center", gap: 5, marginTop: 8 }}>
+                {Array.from({ length: Math.min(3, Math.ceil(items.length / 2)) }).map((_, i) => (
+                  <div key={i} style={{ width: i === 0 ? 18 : 6, height: 6, borderRadius: 99, background: i === 0 ? T.paper : `${T.muted}44` }} />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      // ── [kept] AccountHeader alias used by PhaseSetup error path ──
+      const AccountHeader = ({ active = false }) => <HeroCard active={active} />;
+
+      const SmartAlert = () => {
+        if (!smartAlert || scalpMode !== "smart") return null;
+        return (
+          <div style={{ background: `${T.gold}16`, border: `1px solid ${T.gold}66`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 7, color: T.paper, fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14 }}>
+                <Bell size={16} /> Setup ready
+              </div>
+              <button onClick={() => setSmartAlert(null)} aria-label="Dismiss signal" style={{ background: "none", border: "none", color: T.muted, cursor: "pointer" }}>
+                <X size={16} />
+              </button>
+            </div>
+            <div style={{ fontSize: 13.5, color: T.paper, lineHeight: 1.5 }}>
+              <strong>{smartAlert.asset}</strong> is showing a {smartAlert.direction} setup at {signalConfidence(smartAlert)}% confidence.
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button onClick={() => handleExecuteSignal(smartAlert)} disabled={busy} style={{ flex: 1, background: T.gold, color: T.ink, border: "none", borderRadius: 9, padding: "9px 12px", fontFamily: FONT_HEAD, fontWeight: 800, cursor: busy ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
+                Execute
+              </button>
+              <button onClick={() => setSmartAlert(null)} style={{ flex: 1, background: "transparent", color: T.muted, border: `1px solid ${T.cardBorder}`, borderRadius: 9, padding: "9px 12px", fontFamily: FONT_HEAD, fontWeight: 700, cursor: "pointer", transition: "all 0.2s" }}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        );
+      };
+
+      const BROKER_SERVERS = ["ICMarkets-Live", "ICMarkets-Demo", "Exness-Real", "Exness-MT5Trial", "FTMO-Server", "XM.COM-Real 3", "XM.COM-Demo", "HFMarkets-Live Server", "Pepperstone-Edge-Live", "Pepperstone-MT5-Live", "OctaFX-Real", "FBS-Real", "Tickmill-Live", "Vantage-Real", "GO Markets Group-Live", "Axiory-Real", "EasyMarkets-MT5 Real", "ThinkMarkets-Live"];
+
+      const PhaseSetup = () => (
+        <div>
+          <div style={{ background: `${T.sage}14`, border: `1px solid ${T.sage}44`, borderRadius: 14, padding: "12px 16px", marginBottom: 16 }}><div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: T.sage, fontWeight: 700, marginBottom: 3 }}><ShieldCheck size={16} /> Start with a Demo account</div><div style={{ fontSize: 13, color: T.muted, lineHeight: 1.6 }}>Open a free demo account on any MT5 broker and test Raina AI scalping with virtual funds before going live.</div></div>
+          <div style={{ marginBottom: 16 }}><div style={{ fontSize: 13.5, color: T.muted, fontFamily: FONT_HEAD, fontWeight: 700, marginBottom: 8 }}>Connection Method</div><div style={{ display: "flex", gap: 8 }}>{[["metaapi", "MetaAPI (Cloud)"], ["ea", "EA Desktop"]].map(([m, label]) => <button key={m} onClick={() => { setConnectMethod(m); setErr(""); }} style={{ flex: 1, background: connectMethod === m ? T.gold : T.card, color: connectMethod === m ? T.ink : T.muted, border: `1px solid ${connectMethod === m ? T.gold : T.cardBorder}`, borderRadius: 10, padding: "10px 6px", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, cursor: "pointer", transition: "all 0.2s" }}>{label}</button>)}</div><div style={{ fontSize: 12.5, color: T.muted, marginTop: 6, lineHeight: 1.5 }}>{connectMethod === "metaapi" ? "Recommended — no PC or VPS needed. Raina AI stays connected to your broker through MetaAPI cloud." : "Install an Expert Advisor in your local MetaTrader 5. MT5 must stay open on a PC or VPS."}</div></div>
+          <div style={{ marginBottom: 16 }}><div style={{ fontSize: 13.5, color: T.muted, fontFamily: FONT_HEAD, fontWeight: 700, marginBottom: 8 }}>Account Mode</div><div style={{ display: "flex", gap: 8 }}>{["demo", "live"].map(m => <button key={m} onClick={() => setMode(m)} style={{ flex: 1, background: mode === m ? T.gold : T.card, color: mode === m ? T.ink : T.muted, border: `1px solid ${mode === m ? T.gold : T.cardBorder}`, borderRadius: 10, padding: "10px 0", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14.5, cursor: "pointer", textTransform: "capitalize", transition: "all 0.2s" }}>{m}</button>)}</div></div>
+          {connectMethod === "metaapi" ? <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}><div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14.5, color: T.paper, marginBottom: 4 }}><Key size={16} /> MT5 Credentials</div><div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>Your credentials are encrypted in transit and used only to connect your trading account.</div><div style={{ marginBottom: 14 }}><div style={{ fontSize: 13, color: T.muted, fontWeight: 700, marginBottom: 4 }}>MT5 Login Number</div><input type="text" value={mt5Login} onChange={e => setMt5Login(e.target.value)} placeholder="e.g. 12345678" style={{ width: "100%", background: T.ink, border: `1px solid ${T.cardBorder}`, borderRadius: 9, color: T.paper, fontSize: 15, padding: "10px 12px", fontFamily: FONT_BODY, outline: "none", boxSizing: "border-box" }} /></div><div style={{ marginBottom: 14 }}><div style={{ fontSize: 13, color: T.muted, fontWeight: 700, marginBottom: 4 }}>MT5 Password</div><input type="password" value={mt5Password} onChange={e => setMt5Password(e.target.value)} placeholder="Master or Investor password" style={{ width: "100%", background: T.ink, border: `1px solid ${T.cardBorder}`, borderRadius: 9, color: T.paper, fontSize: 15, padding: "10px 12px", fontFamily: FONT_BODY, outline: "none", boxSizing: "border-box" }} /></div><div><div style={{ fontSize: 13, color: T.muted, fontWeight: 700, marginBottom: 4 }}>Broker Server</div><input type="text" value={mt5Server} onChange={e => setMt5Server(e.target.value)} placeholder="e.g. ICMarkets-Demo" list="broker-servers" style={{ width: "100%", background: T.ink, border: `1px solid ${T.cardBorder}`, borderRadius: 9, color: T.paper, fontSize: 15, padding: "10px 12px", fontFamily: FONT_BODY, outline: "none", boxSizing: "border-box" }} /><datalist id="broker-servers">{BROKER_SERVERS.map(s => <option key={s} value={s} />)}</datalist></div></div> : <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}><div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14.5, color: T.paper, marginBottom: 4 }}><Key size={16} /> EA Desktop Mode</div><div style={{ fontSize: 13, color: T.muted, lineHeight: 1.7 }}>Generate an API key, install the Raina AI Expert Advisor in MetaTrader 5, and keep MT5 open on a PC or VPS.</div></div>}
+          {err && <div style={{ fontSize: 13.5, color: T.rust, marginBottom: 10, padding: "10px 12px", background: `${T.rust}15`, borderRadius: 9, lineHeight: 1.5 }}>{err}</div>}
+          <button onClick={handleConnect} disabled={busy} style={{ width: "100%", background: T.goldGradient, color: T.ink, border: "none", borderRadius: 12, padding: "13px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, cursor: busy ? "not-allowed" : "pointer", transition: "all 0.2s" }}>{busy ? "Connecting…" : connectMethod === "metaapi" ? "Connect via MetaAPI" : "Generate API Key & Connect"}</button>
+          {Disclaimer()}
+        </div>
+      );
+
+      const PhasePending = () => (
+        <div>
+          <div style={{ background: `${T.gold}14`, border: `1px solid ${T.gold}55`, borderRadius: 14, padding: "14px 16px", marginBottom: 16, textAlign: "center" }}>
+            <Activity size={20} color={T.paper} />
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: T.paper, margin: "6px 0 4px" }}>Waiting for MT5 connection</div>
+            <div style={{ fontSize: 13.5, color: T.muted, lineHeight: 1.6 }}>Install the Expert Advisor in MetaTrader 5 to complete setup. This page checks automatically every 30 seconds.</div>
+          </div>
+
+          {apiKey && (
+            <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 14 }}>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper, marginBottom: 10 }}>Your API Key</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.ink, borderRadius: 9, padding: "10px 12px", marginBottom: 12 }}>
+                <div style={{ flex: 1, fontFamily: "monospace", fontSize: 13, color: T.paper, wordBreak: "break-all" }}>{showKey ? apiKey : "●".repeat(Math.min(apiKey.length, 36))}</div>
+                <button onClick={() => setShowKey(v => !v)} style={{ background: "none", border: "none", color: T.muted, cursor: "pointer" }}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+                <button onClick={() => navigator.clipboard?.writeText(apiKey)} style={{ background: "none", border: "none", color: T.gold, cursor: "pointer", fontSize: 12.5, fontFamily: FONT_BODY }}>Copy</button>
+              </div>
+              {mt5UserId && (
+                <a
+                  href={`/api/mt5/ea/download/${mt5UserId}`}
+                  download={`RainX_Scalper.mq5`}
+                  style={{ display: "block", width: "100%", background: T.goldGradient, color: T.ink, border: "none", borderRadius: 10, padding: "11px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14.5, cursor: "pointer", textAlign: "center", textDecoration: "none", boxSizing: "border-box" }}
+                >
+                  ⬇ Download EA File (.mq5)
+                </a>
+              )}
+            </div>
+          )}
+
+          <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 14 }}>
+            <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper, marginBottom: 10 }}>EA Installation Steps</div>
+            {[
+              "Download the EA file above (it has your API key pre-filled)",
+              "In MT5 → File → Open Data Folder → MQL5 → Experts",
+              "Copy RainX_Scalper.mq5 into the Experts folder",
+              "Restart MT5 — the EA appears in your Navigator panel",
+              "Drag it onto any chart (currency pair doesn't matter)",
+              "MT5 → Tools → Options → Expert Advisors → tick 'Allow WebRequests' → add: raina-ai-production-b247.up.railway.app",
+              "Click ▶ Auto Trading and keep MT5 open (PC or VPS)",
+            ].map((step, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, marginBottom: 8, alignItems: "flex-start" }}>
+                <span style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: T.paper, minWidth: 18 }}>{i + 1}.</span>
+                <span style={{ fontSize: 13, color: T.paper, lineHeight: 1.65 }}>{step}</span>
+              </div>
+            ))}
+          </div>
+          {Disclaimer()}
+        </div>
+      );
+
+      const PhaseConnected = () => (
+        <div>
+          <HeroCard active={false} />
+          <ScalpModeCards />
+          {SymbolPicker()}
+          {RiskSettings()}
+          {err && <div style={{ fontSize: 13.5, color: T.rust, marginBottom: 10, padding: "10px 12px", background: `${T.rust}15`, borderRadius: 9, lineHeight: 1.5 }}>{err}</div>}
+          <button onClick={handleToggle} disabled={busy || !selectedSymbol} style={{ width: "100%", background: selectedSymbol ? T.goldGradient : T.card, color: selectedSymbol ? T.ink : T.muted, border: selectedSymbol ? "none" : `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, cursor: busy || !selectedSymbol ? "not-allowed" : "pointer", marginBottom: 14, transition: "all 0.2s" }}>
+            {busy ? "Please wait…" : selectedSymbol ? `Start ${scalpMode === "quick" ? "Quick" : "Smart"} Scalp` : "Select a market to start scalping"}
+          </button>
+          {Disclaimer()}
+        </div>
+      );
+
+      const PhaseActive = () => {
+        const pnl = Number(perf?.total_profit) || 0;
+        return (
+          <div>
+            {/* 1 — Hero card */}
+            <HeroCard active />
+
+            {/* 2 — Mode selector cards */}
+            <ScalpModeCards />
+
+            {/* 3 — Hot Markets horizontal scroll */}
+            <HotMarkets onSeeAll={() => {}} />
+
+            {/* 4 — Smart alert */}
+            {SmartAlert()}
+
+            {/* 5 — Performance stats */}
+            {perf && (
+              <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 18, padding: "14px 14px 12px", marginBottom: 12 }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper, marginBottom: 12 }}>Performance</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                  {[
+                    { label: "Win Rate", val: `${perf.win_rate ?? 0}%`, col: T.paper },
+                    { label: "Trades", val: perf.total_trades ?? 0, col: T.paper },
+                    { label: "P&L", val: `${pnl >= 0 ? "+" : ""}${money(pnl)}`, col: pnl >= 0 ? T.sage : T.rust },
+                  ].map(({ label, val, col }) => (
+                    <div key={label} style={{ background: `${T.ink}88`, borderRadius: 12, padding: "11px 8px", textAlign: "center" }}>
+                      <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 15, color: col }}>{val}</div>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 6 — Open trades */}
+            {trades.length > 0 && (
+              <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 18, padding: "14px", marginBottom: 12 }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper, marginBottom: 12 }}>
+                  Open Trades <span style={{ color: T.muted, fontWeight: 500 }}>({trades.length})</span>
+                </div>
+                {trades.map((trade, i) => {
+                  const TradeIcon = trade.direction === "SELL" ? TrendingDown : TrendingUp;
+                  return (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: i < trades.length - 1 ? `1px solid ${T.cardBorder}` : "none" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                        <div style={{ width: 32, height: 32, borderRadius: 9, background: `${T.gold}18`, display: "grid", placeItems: "center" }}>
+                          <TradeIcon size={16} color={T.paper} />
+                        </div>
+                        <div>
+                          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>{trade.asset || "—"}</div>
+                          <div style={{ fontSize: 11.5, color: T.muted, marginTop: 1 }}>{trade.direction || "—"}</div>
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 13, color: T.muted }}>Lot {trade.lot_size ?? "—"}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* 7 — Live Signals detail */}
+            <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 18, padding: "14px", marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper }}>
+                  <Activity size={15} color={T.paper} /> Live Signals
+                </div>
+                {sigLoading && <div style={{ width: 18, height: 18, border: `2px solid ${T.cardBorder}`, borderTopColor: T.paper, borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />}
+              </div>
+              {sigLoading && signals.length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13.5, padding: "14px 0" }}>Loading signals…</div>}
+              {signals.map((sig, i) => <SignalCard key={`${signalKey(sig)}-${i}`} sig={sig} />)}
+              {!sigLoading && signals.length === 0 && (
+                <div style={{ textAlign: "center", padding: "8px 0" }}>
+                  <Activity size={20} color={T.muted} />
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper, marginTop: 8 }}>No trade setup yet</div>
+                  {holdSignal ? (
+                    <>
+                      <div style={{ fontSize: 12.5, color: T.muted, marginTop: 8, lineHeight: 1.65, textAlign: "left", background: `${T.ink}99`, borderRadius: 9, padding: "9px 11px" }}>
+                        {holdSignal.explanation || "Market is in a consolidation zone — waiting for a clear directional move."}
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, padding: "7px 11px", background: `${T.gold}12`, borderRadius: 9 }}>
+                        <div style={{ fontSize: 12, color: T.muted }}>Current confidence</div>
+                        <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13.5, color: Math.round(holdSignal.confidence || 0) >= 40 ? T.paper : T.muted }}>
+                          {Math.round(holdSignal.confidence || 0)}% <span style={{ fontSize: 11, color: T.muted, fontWeight: 500 }}>/ 55% needed</span>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ fontSize: 12.5, color: T.muted, marginTop: 5 }}>Raina AI is monitoring. Signals appear when conditions align.</div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 8 — Risk settings (collapsible) */}
+            {RiskSettings()}
+
+            {/* 9 — Error */}
+            {err && <div style={{ fontSize: 13.5, color: T.rust, marginBottom: 10, padding: "10px 12px", background: `${T.rust}15`, borderRadius: 9, lineHeight: 1.5 }}>{err}</div>}
+
+            {/* 10 — Pause button */}
+            <button onClick={handleToggle} disabled={busy} style={{ width: "100%", background: `${T.rust}18`, color: T.rust, border: `1px solid ${T.rust}55`, borderRadius: 14, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15, cursor: busy ? "not-allowed" : "pointer", transition: "all 0.2s" }}>
+              {busy ? "Please wait…" : "Pause Scalping"}
+            </button>
+          </div>
+        );
+      };
+
+      return (
+        <div style={{ padding: "0 0 90px" }}>
+          {/* ── Page header ── */}
+          <div style={{ padding: "18px 16px 12px", textAlign: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+              <Zap size={18} color={T.paper} />
+              <span style={{ fontFamily: FONT_HEAD, fontWeight: 900, fontSize: 22, color: T.paper }}>RainX</span>
+            </div>
+            <div style={{ fontSize: 12, color: T.muted, marginTop: 2, fontFamily: FONT_HEAD, fontWeight: 600, letterSpacing: 0.3 }}>Scalping Engine</div>
+          </div>
+
+          {/* ── Content ── */}
+          <div style={{ padding: "0 14px" }}>
+            <BlurGate unlocked={unlocked} requiredLabel="Weekly" onSubscribe={onSubscribe} minHeight={440}>
+              {phase === "loading"
+                ? (
+                  <div>
+                    {/* Skeleton — page renders immediately; data loads in background */}
+                    <div style={{ borderRadius: 16, background: T.card, border: `1px solid ${T.cardBorder}`, padding: 18, marginBottom: 12, animation: "pulse 1.4s ease-in-out infinite" }}>
+                      <div style={{ height: 12, borderRadius: 6, background: T.cardBorder, width: "55%", marginBottom: 10 }} />
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "35%", marginBottom: 18 }} />
+                      <div style={{ display: "flex", gap: 10 }}>
+                        <div style={{ flex: 1, height: 48, borderRadius: 10, background: T.cardBorder }} />
+                        <div style={{ flex: 1, height: 48, borderRadius: 10, background: T.cardBorder }} />
+                      </div>
+                    </div>
+                    <div style={{ borderRadius: 16, background: T.card, border: `1px solid ${T.cardBorder}`, padding: 18, marginBottom: 12, animation: "pulse 1.4s ease-in-out infinite" }}>
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "45%", marginBottom: 10 }} />
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "65%", marginBottom: 10 }} />
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "30%" }} />
+                    </div>
+                    <div style={{ borderRadius: 16, background: T.card, border: `1px solid ${T.cardBorder}`, padding: 18, animation: "pulse 1.4s ease-in-out infinite" }}>
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "70%", marginBottom: 10 }} />
+                      <div style={{ height: 10, borderRadius: 6, background: T.cardBorder, width: "50%" }} />
+                    </div>
+                  </div>
+                )
+                : phase === "setup"    ? PhaseSetup()
+                : phase === "pending"  ? PhasePending()
+                : phase === "connected"? PhaseConnected()
+                : phase === "active"   ? PhaseActive()
+                : PhaseSetup()}
+            </BlurGate>
+          </div>
+
+          {/* ── Mode-switch confirmation modal ── */}
+          {pendingScalpMode && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 20, padding: "24px 20px", maxWidth: 340, width: "100%" }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 17, color: T.paper, marginBottom: 8 }}>Switch to {pendingScalpMode === "quick" ? "Quick" : "Smart"} Scalp?</div>
+                <div style={{ fontSize: 13.5, color: T.muted, lineHeight: 1.6, marginBottom: 20 }}>
+                  {pendingScalpMode === "quick"
+                    ? "Quick Scalp enters trades automatically as soon as a signal fires. Switching now will change how new signals are handled — existing open trades are not affected."
+                    : "Smart Scalp alerts you before each trade so you can approve or dismiss it. Switching now will stop automatic entries — you must confirm each signal manually."}
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => setPendingScalpMode(null)} style={{ flex: 1, background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper, cursor: "pointer" }}>Cancel</button>
+                  <button onClick={() => { setScalpMode(pendingScalpMode); setSmartAlert(null); setPendingScalpMode(null); }} style={{ flex: 1, background: T.goldGradient, border: "none", borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13.5, color: T.ink, cursor: "pointer" }}>Switch</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Disconnect confirmation modal ── */}
+          {showDisconnectConfirm && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+              <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 20, padding: "24px 20px", maxWidth: 340, width: "100%" }}>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 17, color: T.paper, marginBottom: 8 }}>Disconnect MT5?</div>
+                <div style={{ fontSize: 13.5, color: T.muted, lineHeight: 1.6, marginBottom: 20 }}>This will stop scalping and remove your MT5 connection from this device. Open trades on your broker are not affected.</div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => setShowDisconnectConfirm(false)} style={{ flex: 1, background: "none", border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13.5, color: T.paper, cursor: "pointer" }}>Cancel</button>
+                  <button onClick={() => { setShowDisconnectConfirm(false); disconnect(); }} style={{ flex: 1, background: "#E53935", border: "none", borderRadius: 12, padding: "12px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13.5, color: "#fff", cursor: "pointer" }}>Disconnect</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+
+// ---------- More Tab helpers ----------
+
+const DEFAULT_BENEFITS = [
+  { id: "verification", icon: "shield", title: "Verification & Badge", status: null },
+  { id: "rewards",      icon: "trophy", title: "Trader Rewards Programme", status: null },
+];
+
+function BenefitIcon({ type }) {
+  const s = { width: 36, height: 36, borderRadius: 10, background: "rgba(140,140,140,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 };
+  if (type === "trophy") return <div style={s}><Trophy size={18} color={T.muted} /></div>;
+  if (type === "shield") return <div style={s}><ShieldCheck size={18} color={T.muted} /></div>;
+  return <div style={s}><ShieldCheck size={18} color={T.muted} /></div>;
+}
+
+function MoreRow({ icon: Icon, iconType, title, subtitle, badge, badgeColor, onPress }) {
+  return (
+    <button onClick={onPress} style={{ display: "flex", alignItems: "center", width: "100%", background: "none", border: "none", padding: "13px 14px", cursor: "pointer", gap: 12 }}>
+      {iconType ? <BenefitIcon type={iconType} /> : (
+        <div style={{ width: 36, height: 36, borderRadius: 10, background: "rgba(140,140,140,0.14)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon size={18} color={T.muted} />
+        </div>
+      )}
+      <div style={{ flex: 1, textAlign: "left" }}>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{subtitle}</div>}
+      </div>
+      {badge && (
+        <span style={{ fontSize: 10.5, fontWeight: 700, color: badgeColor || T.muted, border: `1px solid ${badgeColor ? badgeColor + "55" : T.cardBorder}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{badge}</span>
+      )}
+      <ChevronRight size={16} color={T.muted} style={{ flexShrink: 0 }} />
+    </button>
+  );
+}
+
+function SecuritySection({ icon: Icon, title, desc, onPress, label, comingSoon }) {
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ width: 40, height: 40, borderRadius: 10, background: "rgba(244,211,94,0.12)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon size={19} color={T.paper} />
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>{title}</span>
+          {comingSoon && <span style={{ fontSize: 9.5, fontWeight: 700, color: T.muted, border: `1px solid ${T.cardBorder}`, borderRadius: 6, padding: "2px 6px", fontFamily: FONT_HEAD }}>SOON</span>}
+        </div>
+        <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>{desc}</div>
+      </div>
+      <button onClick={onPress} style={{ background: comingSoon ? "transparent" : T.gold, border: `1px solid ${comingSoon ? T.cardBorder : T.gold}`, borderRadius: 9, padding: "7px 13px", fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 11.5, color: comingSoon ? T.muted : T.ink, cursor: "pointer", flexShrink: 0 }}>
+        {label}
+      </button>
+    </div>
+  );
+}
+
+// ── Notification Settings Screen ──────────────────────────────────────────
+// ── Push sound map (mirrors sw.js CATEGORY_SOUNDS — keep in sync) ──────────
+    const PUSH_SOUND_MAP = {
+    trading:   "/sounds/Trade%20Entry%20notification%20sound%20.mp3",
+    tp:        "/sounds/take%20profit%20notification%20sound%20.mp3",
+    sl:        "/sounds/Stop%20Loss%20notification%20sound%20.mp3",
+    community: "/sounds/community%20notification.mp3",
+    news:      "/sounds/market%20news%20notification%20sound%20.mp3",
+    risk:      "/sounds/money%20received%20notification.mp3",
+    default:   "/sounds/analysis%20complete%20notification%20.mp3",
+    };
+
+    // ── Sound preview rows for the picker UI ─────────────────────────────────────
+    const SOUND_PREVIEW_ROWS = [
+    { category: "trading",   label: "Trade Signal",      sub: "New BUY / SELL entry",           src: "/sounds/Trade%20Entry%20notification%20sound%20.mp3" },
+    { category: "tp",        label: "Take Profit Hit",   sub: "TP level reached",               src: "/sounds/take%20profit%20notification%20sound%20.mp3" },
+    { category: "sl",        label: "Stop Loss Hit",     sub: "SL level reached",               src: "/sounds/Stop%20Loss%20notification%20sound%20.mp3" },
+    { category: "news",      label: "Market News",       sub: "CPI, NFP, FOMC, rate decisions", src: "/sounds/market%20news%20notification%20sound%20.mp3" },
+    { category: "community", label: "Community",         sub: "Replies, mentions & posts",      src: "/sounds/community%20notification.mp3" },
+    { category: "risk",      label: "Risk & Wallet",     sub: "Risk warnings, wallet events",   src: "/sounds/money%20received%20notification.mp3" },
+    { category: "default",   label: "Analysis Complete", sub: "Analysis done alerts",           src: "/sounds/analysis%20complete%20notification%20.mp3" },
+    ];
+
+    function SoundPickerCard() {
+    const [playing, setPlaying] = React.useState(null);
+    const audioRef = React.useRef(null);
+    const preview = (row) => {
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+      if (playing === row.category) { setPlaying(null); return; }
+      try {
+        const a = new Audio(row.src);
+        a.volume = 0.9;
+        a.play().catch(() => {});
+        a.onended = () => setPlaying(null);
+        audioRef.current = a;
+        setPlaying(row.category);
+      } catch { setPlaying(null); }
+    };
+    return (
+      <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginTop: 16 }}>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: T.paper, marginBottom: 3 }}>Notification Sounds</div>
+        <div style={{ fontSize: 11, color: T.muted, marginBottom: 14, lineHeight: 1.5 }}>Tap Preview to hear each alert sound before it arrives.</div>
+        {SOUND_PREVIEW_ROWS.map((row, i) => (
+          <div key={row.category} style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            paddingTop: i === 0 ? 0 : 11, paddingBottom: i < SOUND_PREVIEW_ROWS.length - 1 ? 11 : 0,
+            borderBottom: i < SOUND_PREVIEW_ROWS.length - 1 ? `1px solid ${T.cardBorder}` : "none",
+          }}>
+            <div style={{ flex: 1, minWidth: 0, marginRight: 10 }}>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 600, fontSize: 12.5, color: T.paper }}>{row.label}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 1 }}>{row.sub}</div>
+            </div>
+            <button onClick={() => preview(row)} style={{
+              background: playing === row.category ? T.sage : "transparent",
+              color: playing === row.category ? T.ink : T.gold,
+              border: `1.5px solid ${playing === row.category ? T.sage : T.gold}`,
+              borderRadius: 8, padding: "5px 13px",
+              fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 11,
+              cursor: "pointer", flexShrink: 0, transition: "all 0.18s",
+            }}>
+              {playing === row.category ? "Playing…" : "Preview"}
+            </button>
+          </div>
+        ))}
+        <div style={{ marginTop: 12, fontSize: 10.5, color: T.muted, lineHeight: 1.6 }}>
+          Each alert type has its own unique sound — plays automatically even when RainX is closed.
+        </div>
+      </div>
+    );
+    }
+
+    const NOTIF_CATEGORIES = [
+  { key: "trading",   label: "Trading & Raina AI",  desc: "Signals, entries, TP/SL alerts" },
+  { key: "news",      label: "Market News",          desc: "CPI, NFP, FOMC, rate decisions" },
+  { key: "community", label: "Community",            desc: "Likes, comments, follows, mentions" },
+  { key: "money",     label: "Money & Rewards",      desc: "Transfers, rewards, wallet updates" },
+  { key: "system",    label: "System",               desc: "Security, account, announcements" },
+];
+function NotificationSettingsScreen({ account, activeMarkets = [] }) {
+  const [prefs, setPrefs] = useState(() => {
+    try { return JSON.parse(lsGet("rainx-notif-prefs") || "{}"); } catch { return {}; }
+  });
+  const masterOn = prefs.master !== false;
+  const toggle = (key) => {
+    setPrefs(prev => {
+      const next = key === "master"
+        ? { ...prev, master: !masterOn }
+        : { ...prev, [key]: prev[key] === false ? true : false };
+      lsSet("rainx-notif-prefs", JSON.stringify(next));
+      return next;
+    });
+  };
+  const bg = "#F2F3F5", card = "#FFFFFF", border = "#E7E9EC", text = "#111418", muted = "#737B85", yellow = T.gold;
+  const SwitchToggle = ({ on, onChange }) => (
+    <button type="button" aria-pressed={on} onClick={e=>{e.stopPropagation();onChange();}} style={{ width:44,height:25,padding:0,border:0,borderRadius:13,background:on?yellow:"#D7DBE0",position:"relative",cursor:"pointer",transition:"background .18s",flexShrink:0 }}>
+      <span style={{position:"absolute",top:3,left:on?22:3,width:19,height:19,borderRadius:"50%",background:"#fff",boxShadow:"0 1px 3px rgba(0,0,0,.18)",transition:"left .18s"}} />
+    </button>
+  );
+  return (
+    <div style={{ background:bg, padding:"16px 16px 28px", minHeight:"100%" }}>
+      <div style={{ background:card, border:`1px solid ${border}`, borderRadius:17, padding:"15px 16px", marginBottom:16, boxShadow:"0 1px 2px rgba(15,20,25,.03)" }}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}>
+          <div><div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:14,color:text}}>All Notifications</div><div style={{fontSize:11.2,color:muted,marginTop:3}}>Master control for all alerts</div></div>
+          <SwitchToggle on={masterOn} onChange={()=>toggle("master")} />
+        </div>
+      </div>
+      <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:12.5,color:muted,margin:"0 0 8px 4px",textTransform:"uppercase"}}>Categories</div>
+      <div style={{ background:card,border:`1px solid ${border}`,borderRadius:17,overflow:"hidden",boxShadow:"0 1px 2px rgba(15,20,25,.03)" }}>
+        {NOTIF_CATEGORIES.map((cat,i)=>{
+          const catOn = masterOn && prefs[cat.key] !== false;
+          return <React.Fragment key={cat.key}>
+            {i>0&&<div style={{height:1,background:border,marginLeft:16}}/>}
+            <div onClick={()=>masterOn&&toggle(cat.key)} style={{padding:"14px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,opacity:masterOn?1:.5,cursor:masterOn?"pointer":"default"}}>
+              <div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:13,color:text}}>{cat.label}</div><div style={{fontSize:11,color:muted,marginTop:3,lineHeight:1.35}}>{cat.desc}</div></div>
+              <SwitchToggle on={catOn} onChange={()=>toggle(cat.key)} />
+            </div>
+          </React.Fragment>;
+        })}
+      </div>
+      <SoundPickerCard />
+    </div>
+  );
+}
+
+function MoreSection({ title, children }) {
+  return (
+    <div style={{ marginBottom: 22 }}>
+      <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: T.paper, marginBottom: 8, paddingLeft: 2 }}>{title}</div>
+      <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 16, overflow: "hidden" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function MoreRowDivider() {
+  return <div style={{ height: 1, background: T.cardBorder, marginLeft: 62 }} />;
+}
+
+function GoldBarsIcon() {
+  return (
+    <svg width="96" height="78" viewBox="0 0 96 78" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <g transform="translate(0,52)">
+        <path d="M10 0 L82 0 L92 9 L92 24 L20 24 L10 15 Z" fill="url(#bf1)"/>
+        <path d="M82 0 L92 9 L92 24 L82 15 Z" fill="url(#bs1)"/>
+        <path d="M10 0 L82 0 L92 9 L20 9 Z" fill="url(#bt1)"/>
+      </g>
+      <g transform="translate(0,27)">
+        <path d="M10 0 L82 0 L92 9 L92 24 L20 24 L10 15 Z" fill="url(#bf2)"/>
+        <path d="M82 0 L92 9 L92 24 L82 15 Z" fill="url(#bs2)"/>
+        <path d="M10 0 L82 0 L92 9 L20 9 Z" fill="url(#bt2)"/>
+      </g>
+      <g transform="translate(0,2)">
+        <path d="M10 0 L82 0 L92 9 L92 24 L20 24 L10 15 Z" fill="url(#bf3)"/>
+        <path d="M82 0 L92 9 L92 24 L82 15 Z" fill="url(#bs3)"/>
+        <path d="M10 0 L82 0 L92 9 L20 9 Z" fill="url(#bt3)"/>
+      </g>
+      <defs>
+        <linearGradient id="bf1" x1="10" y1="0" x2="10" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bs1" x1="82" y1="0" x2="92" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bt1" x1="10" y1="0" x2="92" y2="9" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="0.5" stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bf2" x1="10" y1="0" x2="10" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bs2" x1="82" y1="0" x2="92" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bt2" x1="10" y1="0" x2="92" y2="9" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="0.5" stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bf3" x1="10" y1="0" x2="10" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+        <linearGradient id="bs3" x1="82" y1="0" x2="92" y2="24" gradientUnits="userSpaceOnUse"><stop stopColor="#AA8828"/><stop offset="1" stopColor="#5F4010"/></linearGradient>
+        <linearGradient id="bt3" x1="10" y1="0" x2="92" y2="9" gradientUnits="userSpaceOnUse"><stop stopColor="#F4D35E"/><stop offset="0.5" stopColor="#F4D35E"/><stop offset="1" stopColor="#F4D35E"/></linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+function StableLightSheet({ children, onClose }) {
+  const sheetRef = useRef(null);
+  const nativeSheetOpen = useNativeBottomSheet(sheetRef, true, onClose);
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(15,20,25,.20)", backdropFilter:nativeSheetOpen ? "none" : "blur(7px)", WebkitBackdropFilter:nativeSheetOpen ? "none" : "blur(7px)", zIndex:900, display:"flex", alignItems:"flex-end", overscrollBehaviorY:"none", pointerEvents:nativeSheetOpen ? "none" : "auto" }}>
+      <div ref={sheetRef} onClick={e=>e.stopPropagation()} style={{ width:"100%", maxWidth:480, margin:"0 auto", background:"#FFFFFF", border:"1px solid #E7E9EC", borderBottom:0, borderRadius:"22px 22px 0 0", padding:"11px 18px 28px", boxShadow:"0 -10px 35px rgba(15,20,25,.12)", transform:"translateY(0)", willChange:"transform", animation:"rxLightSheetUp .26s cubic-bezier(.22,1,.36,1)", maxHeight:"90dvh", overflowY:"auto", overscrollBehaviorY:"contain", WebkitOverflowScrolling:"touch" }}>
+        <div style={{ width:42, height:5, borderRadius:3, background:"#D9DDE1", margin:"0 auto 18px" }} />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function MoreSubScreen({ onBack, title, subtitle, rightElement, children }) {
+  const lightPrefScreen = title === "Settings" || title === "Security" || title === "Notifications";
+  const prefBg = "#F2F3F5";
+  const prefText = "#111418";
+  const prefBorder = "#E7E9EC";
+  return (
+    <div style={{ minHeight: "100%", animation: "slideInRight 0.2s ease", background: lightPrefScreen ? prefBg : T.card }}>
+      <style>{"@keyframes slideInRight { from { transform: translateX(24px); opacity:0; } to { transform: translateX(0); opacity:1; } } @keyframes rxLightSheetUp { from { transform:translateY(100%); opacity:.7 } to { transform:translateY(0); opacity:1 } }"}</style>
+      <div style={{ display: "flex", alignItems: "center", padding: "10px 16px 10px", borderBottom: `1px solid ${lightPrefScreen ? prefBorder : T.cardBorder}`, background: lightPrefScreen ? prefBg : T.card }}>
+        <button onClick={onBack} style={{ background: "none", border: "none", color: lightPrefScreen ? prefText : T.paper, cursor: "pointer", display: "flex", alignItems: "center", padding: "4px", borderRadius: 8, flexShrink: 0 }}>
+          <ChevronLeft size={22} />
+        </button>
+        <div style={{ flex: 1, textAlign: "center" }}>
+          {title && <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: lightPrefScreen ? prefText : T.paper, lineHeight: 1.2 }}>{title}</div>}
+          {subtitle && <div style={{ fontSize: 11, color: lightPrefScreen ? "#737B85" : T.muted, marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        <div style={{ flexShrink: 0, width: 30, display: "flex", justifyContent: "flex-end" }}>
+          {rightElement || null}
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function RewardsScreen({ account, entitlement }) {
+  const [rewardsData, setRewardsData] = useState(null);
+  const [txns, setTxns] = useState([]);
+  const [quickPage, setQuickPage] = useState(null);
+
+  useEffect(() => {
+    if (!account?.id) return;
+    supabase.from("wallet_balances").select("*").eq("user_id", account.id).single()
+      .then(({ data }) => { if (data) setRewardsData(data); }).catch(() => {});
+    supabase.from("wallet_transactions").select("*").eq("user_id", account.id)
+      .order("created_at", { ascending: false }).limit(20)
+      .then(({ data }) => { if (data) setTxns(data); }).catch(() => {});
+  }, [account?.id]);
+
+  const totalBalance    = rewardsData?.balance         ?? 0;
+  const totalEarned     = rewardsData?.total_earned    ?? 0;
+  const totalWithdrawn  = rewardsData?.total_withdrawn ?? 0;
+  const pending         = rewardsData?.pending         ?? 0;
+  const weeklyPct       = rewardsData?.weekly_change_pct ?? 0;
+
+  const fmtGHS = (n) =>
+    `GHS ${Number(n).toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const quickItems = [
+    { icon: Landmark,       label: "Bank\nAccounts",       page: "bank"      },
+    { icon: Gift,           label: "My\nRewards",          page: "myRewards" },
+    { icon: Trophy,         label: "Post\nGifts",          page: "postGifts" },
+    { icon: CreditCardIcon, label: "Payout\nMethods",      page: "payout"    },
+    { icon: ScrollText,     label: "Transaction\nHistory", page: "txHistory" },
+  ];
+
+  const activityIcon = (type) => {
+    if (!type) return Gift;
+    const t = type.toLowerCase();
+    if (t.includes("gift") || t.includes("post")) return Gift;
+    if (t.includes("reward") || t.includes("bonus") || t.includes("earn")) return Trophy;
+    if (t.includes("withdraw") || t.includes("bank") || t.includes("payout")) return Landmark;
+    return CreditCardIcon;
+  };
+
+  const fmtDate = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 86400000)  return `Today, ${d.toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit" })}`;
+    if (diff < 172800000) return `Yesterday, ${d.toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit" })}`;
+    return d.toLocaleDateString("en-GH");
+  };
+
+  const DEMO_TXN = [
+    { id: "d1", type: "Post Gift Received",  description: "From: Kofi Mensah",         amount:  150, created_at: new Date(Date.now() - 1000 * 60 * 75).toISOString()  },
+    { id: "d2", type: "Reward Earned",        description: "Daily Check-in Bonus",      amount:   20, created_at: new Date(Date.now() - 1000 * 60 * 165).toISOString() },
+    { id: "d3", type: "Bank Withdrawal",      description: "To: GCB Bank •••• 1234",   amount: -300, created_at: new Date(Date.now() - 86400000).toISOString()         },
+  ];
+  const displayTxns = txns.length > 0 ? txns : DEMO_TXN;
+
+  if (quickPage) {
+    const titles = {
+      bank: "Bank Accounts", myRewards: "My Rewards", postGifts: "Post Gifts",
+      payout: "Payout Methods", txHistory: "Transaction History",
+    };
+    return (
+      <div style={{ padding: 16 }}>
+        <button onClick={() => setQuickPage(null)} style={{ background: "none", border: "none", color: T.goldBright, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, marginBottom: 16 }}>
+          <ChevronLeft size={18} /> Back
+        </button>
+        <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 16, padding: 32, textAlign: "center" }}>
+          <div style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(244,211,94,0.12)", border: `1px solid ${T.cardBorder}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+            <Trophy size={26} color={T.goldBright} />
+          </div>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 15, color: T.paper, marginBottom: 8 }}>{titles[quickPage]}</div>
+          <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.7 }}>This feature is coming soon. Check back for updates.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ overflowY: "auto", paddingBottom: 32 }}>
+
+      {/* Balance Card — uses theme tokens, no hardcoded dark colors */}
+      <div style={{ margin: "16px 16px 0" }}>
+        <div style={{ background: `linear-gradient(135deg, ${T.card} 0%, ${T.ink} 100%)`, border: `1px solid ${T.cardBorder}`, borderRadius: 18, padding: "22px 20px 20px", position: "relative", overflow: "hidden" }}>
+          <div style={{ position: "absolute", inset: 0, borderRadius: 18, background: "linear-gradient(135deg, rgba(244,211,94,0.07) 0%, transparent 60%)", pointerEvents: "none" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11.5, color: T.goldBright, fontWeight: 600, marginBottom: 8, letterSpacing: 0.3 }}>Total Rewards Balance</div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 32, color: T.paper, letterSpacing: -0.5, lineHeight: 1.15 }}>{fmtGHS(totalBalance)}</div>
+              <div style={{ marginTop: 14 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: `${T.cardBorder}88`, border: `1px solid ${T.gold}44`, borderRadius: 20, padding: "5px 12px", fontSize: 11.5, color: weeklyPct >= 0 ? T.goldBright : T.rust, fontWeight: 600 }}>
+                  {weeklyPct >= 0 ? `+${weeklyPct.toFixed(2)}%` : `${weeklyPct.toFixed(2)}%`} this week
+                </span>
+              </div>
+            </div>
+            <div style={{ marginLeft: 8, marginTop: -4, flexShrink: 0 }}>
+              <GoldBarsIcon />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Quick Access */}
+      <div style={{ padding: "22px 16px 0" }}>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: T.paper, marginBottom: 16 }}>Quick Access</div>
+        <div style={{ display: "flex", justifyContent: "space-between" }}>
+          {quickItems.map(({ icon: Icon, label, page }) => (
+            <button key={page} onClick={() => setQuickPage(page)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 0, flex: 1 }}>
+              <div style={{ width: 54, height: 54, borderRadius: "50%", background: T.card, border: `1px solid ${T.cardBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Icon size={22} color={T.goldBright} strokeWidth={1.5} />
+              </div>
+              <div style={{ fontSize: 10.5, color: T.paper, textAlign: "center", fontWeight: 500, whiteSpace: "pre-line", lineHeight: 1.35 }}>{label}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Your Overview */}
+      <div style={{ padding: "20px 16px 0" }}>
+        <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 16, padding: "18px 16px 16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 16 }}>
+            <span style={{ fontSize: 16, color: T.goldBright }}>↗</span>
+            <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>Your Overview</span>
+          </div>
+          <div style={{ display: "flex" }}>
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 5 }}>Total Earned</div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: T.paper }}>{fmtGHS(totalEarned)}</div>
+              <div style={{ fontSize: 10, color: T.muted, marginTop: 3 }}>All time</div>
+            </div>
+            <div style={{ width: 1, background: T.cardBorder }} />
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 5 }}>Total Withdrawn</div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: T.paper }}>{fmtGHS(totalWithdrawn)}</div>
+              <div style={{ fontSize: 10, color: T.muted, marginTop: 3 }}>All time</div>
+            </div>
+            <div style={{ width: 1, background: T.cardBorder }} />
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 5 }}>Pending</div>
+              <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 13, color: T.paper }}>{fmtGHS(pending)}</div>
+              <div style={{ fontSize: 10, color: T.muted, marginTop: 3 }}>Processing</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Activity */}
+      <div style={{ padding: "20px 16px 0" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.goldBright }}>Recent Activity</span>
+          <button onClick={() => setQuickPage("txHistory")} style={{ background: "none", border: "none", color: T.goldBright, cursor: "pointer", display: "flex", alignItems: "center", gap: 2, fontSize: 12, fontFamily: FONT_HEAD, fontWeight: 600 }}>
+            View all <ChevronRight size={14} />
+          </button>
+        </div>
+        <div>
+          {displayTxns.map((tx, i) => {
+            const IconComp = activityIcon(tx.type);
+            const isPos = (tx.amount || 0) >= 0;
+            return (
+              <button key={tx.id || i} onClick={() => setQuickPage("txHistory")} style={{ width: "100%", background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: 14, padding: "13px 0", borderBottom: i < displayTxns.length - 1 ? `1px solid ${T.cardBorder}` : "none" }}>
+                <div style={{ width: 44, height: 44, borderRadius: "50%", background: `rgba(244,211,94,0.12)`, border: `1px solid ${T.cardBorder}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <IconComp size={20} color={T.goldBright} strokeWidth={1.6} />
+                </div>
+                <div style={{ flex: 1, textAlign: "left" }}>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 600, fontSize: 13, color: T.paper }}>{tx.type || "Transaction"}</div>
+                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{tx.description || ""}</div>
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: isPos ? T.goldBright : T.rust }}>
+                    {isPos ? `+${fmtGHS(Math.abs(tx.amount || 0))}` : `-${fmtGHS(Math.abs(tx.amount || 0))}`}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{fmtDate(tx.created_at)}</div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── Creator Wallet Screen ─────────────────────────────────────────────────
+function CreatorWalletScreen({ account }) {
+  const [walletData, setWalletData] = useState(null);
+  const [txns, setTxns] = useState([]);
+  const [walletPage, setWalletPage] = useState(null); // "topup" | "withdraw" | "history"
+  const [payStep, setPayStep] = useState(null);   // chosen payment method
+  const [amount, setAmount] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    if (!account?.id) return;
+    supabase.from("wallet_balances").select("*").eq("user_id", account.id).single()
+      .then(({ data }) => { if (data) setWalletData(data); }).catch(() => {});
+    supabase.from("wallet_transactions").select("*").eq("user_id", account.id)
+      .order("created_at", { ascending: false }).limit(15)
+      .then(({ data }) => { if (data) setTxns(data); }).catch(() => {});
+  }, [account?.id]);
+
+  const balance = walletData?.balance ?? 0;
+  const fmtGHS  = (n) => `GHS ${Number(n).toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const fmtDate = (iso) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const diff = Date.now() - d;
+    if (diff < 86400000) return `Today, ${d.toLocaleTimeString("en-GH", { hour: "2-digit", minute: "2-digit" })}`;
+    if (diff < 172800000) return `Yesterday`;
+    return d.toLocaleDateString("en-GH");
+  };
+
+  const PAYMENT_METHODS = [
+    { id: "momo", label: "Mobile Money (MTN MoMo)", icon: "📱" },
+    { id: "bank", label: "Bank Transfer", icon: "🏦" },
+    { id: "card", label: "Visa / Mastercard", icon: "💳" },
+  ];
+
+  const handleSubmit = async () => {
+    if (!amount || isNaN(+amount) || +amount <= 0) { setMsg("Enter a valid amount."); return; }
+    setBusy(true); setMsg("");
+    await supabase.from("wallet_transactions").insert({
+      user_id: account.id,
+      type: walletPage === "topup" ? "Top Up" : "Withdrawal",
+      amount: walletPage === "topup" ? +amount : -(+amount),
+      description: `Via ${payStep?.label || "—"}`,
+      status: "pending",
+    });
+    setBusy(false);
+    setMsg(walletPage === "topup" ? "Top-up request submitted! You will be notified once confirmed." : "Withdrawal request submitted! Processing within 24h.");
+    setPayStep(null); setAmount("");
+  };
+
+  // Top-up or withdraw flow
+  if (walletPage && payStep) {
+    return (
+      <div style={{ padding: 16 }}>
+        <button onClick={() => setPayStep(null)} style={{ background: "none", border: "none", color: T.goldBright, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, marginBottom: 16 }}>
+          <ChevronLeft size={16} /> Back
+        </button>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: T.paper, marginBottom: 4 }}>{walletPage === "topup" ? "Top Up Wallet" : "Withdraw Funds"}</div>
+        <div style={{ fontSize: 12, color: T.muted, marginBottom: 20 }}>Via {payStep.label}</div>
+        {msg ? (
+          <div style={{ background: `rgba(122,158,134,0.12)`, border: `1px solid ${T.sage}44`, borderRadius: 14, padding: 18, marginBottom: 16, fontSize: 13, color: T.sage, lineHeight: 1.6 }}>{msg}</div>
+        ) : null}
+        <label style={{ fontSize: 11, color: T.muted, fontWeight: 600, display: "block", marginBottom: 6 }}>Amount (GHS)</label>
+        <input
+          type="number" min="1" value={amount} onChange={e => setAmount(e.target.value)}
+          placeholder="0.00"
+          style={{ ...getInputStyle(), width: "100%", marginBottom: 16, fontSize: 20, fontFamily: FONT_HEAD, fontWeight: 700, textAlign: "center" }}
+        />
+        {!msg && (
+          <button onClick={handleSubmit} disabled={busy} style={{ width: "100%", background: T.goldGradient, color: T.ink, border: "none", borderRadius: 13, padding: "14px 0", fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14, cursor: "pointer" }}>
+            {busy ? "Processing…" : walletPage === "topup" ? `Top Up ${amount ? fmtGHS(+amount) : ""}` : `Withdraw ${amount ? fmtGHS(+amount) : ""}`}
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (walletPage) {
+    return (
+      <div style={{ padding: 16 }}>
+        <button onClick={() => setWalletPage(null)} style={{ background: "none", border: "none", color: T.goldBright, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, marginBottom: 16 }}>
+          <ChevronLeft size={16} /> Back
+        </button>
+        <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 16, color: T.paper, marginBottom: 16 }}>{walletPage === "topup" ? "Select Top-Up Method" : walletPage === "withdraw" ? "Select Withdrawal Method" : "Transaction History"}</div>
+        {walletPage === "history" ? (
+          txns.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "32px 0", color: T.muted, fontSize: 13 }}>No transactions yet.</div>
+          ) : txns.map((tx, i) => {
+            const isPos = (tx.amount || 0) > 0;
+            return (
+              <div key={tx.id || i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "13px 0", borderBottom: i < txns.length - 1 ? `1px solid ${T.cardBorder}` : "none" }}>
+                <div>
+                  <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: T.paper }}>{tx.type || "Transaction"}</div>
+                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{fmtDate(tx.created_at)} · {tx.status || "pending"}</div>
+                </div>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: isPos ? T.goldBright : T.rust }}>
+                  {isPos ? "+" : ""}{fmtGHS(Math.abs(tx.amount || 0))}
+                </div>
+              </div>
+            );
+          })
+        ) : PAYMENT_METHODS.map(m => (
+          <button key={m.id} onClick={() => setPayStep(m)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "14px 16px", marginBottom: 10, cursor: "pointer" }}>
+            <span style={{ fontSize: 24 }}>{m.icon}</span>
+            <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>{m.label}</span>
+            <ChevronRight size={16} color={T.muted} style={{ marginLeft: "auto" }} />
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  // Main wallet screen
+  const DEMO_TXN = [
+    { id: "w1", type: "Top Up",    description: "Via MTN MoMo", amount:  500, created_at: new Date(Date.now() - 3600000).toISOString() },
+    { id: "w2", type: "Withdrawal", description: "To: GCB Bank", amount: -200, created_at: new Date(Date.now() - 172800000).toISOString() },
+  ];
+  const displayTxns = txns.length > 0 ? txns : DEMO_TXN;
+
+  return (
+    <div style={{ paddingBottom: 32 }}>
+      {/* Virtual card */}
+      <div style={{ margin: "16px 16px 0" }}>
+        <div style={{
+          background: T.goldGradient,
+          borderRadius: 20, padding: "26px 22px 22px", position: "relative", overflow: "hidden", minHeight: 170,
+          boxShadow: `0 8px 32px ${T.gold}44`,
+        }}>
+          {/* Decorative circles */}
+          <div style={{ position: "absolute", top: -30, right: -30, width: 130, height: 130, borderRadius: "50%", background: "rgba(255,255,255,0.08)" }} />
+          <div style={{ position: "absolute", bottom: -20, right: 30, width: 90, height: 90, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 11, color: "rgba(0,0,0,0.55)", letterSpacing: 1.5, marginBottom: 24 }}>CREATOR WALLET</div>
+          <div style={{ fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 30, color: T.ink, letterSpacing: -0.5 }}>{fmtGHS(balance)}</div>
+          <div style={{ fontSize: 11, color: "rgba(0,0,0,0.55)", marginTop: 4, fontFamily: FONT_HEAD }}>Available Balance</div>
+          <div style={{ position: "absolute", bottom: 20, right: 22, fontFamily: FONT_HEAD, fontWeight: 800, fontSize: 14, color: "rgba(0,0,0,0.4)" }}>RainX</div>
+        </div>
+      </div>
+
+      {/* Action buttons */}
+      <div style={{ margin: "16px 16px 0", display: "flex", gap: 10 }}>
+        <button onClick={() => setWalletPage("topup")} style={{ flex: 1, background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "16px 0", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: `rgba(244,211,94,0.12)`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <ArrowUpCircle size={22} color={T.gold} />
+          </div>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12.5, color: T.paper }}>Top Up</span>
+        </button>
+        <button onClick={() => setWalletPage("withdraw")} style={{ flex: 1, background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "16px 0", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: `rgba(176,96,74,0.12)`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <ArrowDownCircle size={22} color={T.rust} />
+          </div>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12.5, color: T.paper }}>Withdraw</span>
+        </button>
+        <button onClick={() => setWalletPage("history")} style={{ flex: 1, background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, padding: "16px 0", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 44, height: 44, borderRadius: "50%", background: `rgba(91,156,246,0.12)`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <ScrollText size={22} color="#5B9CF6" />
+          </div>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 12.5, color: T.paper }}>History</span>
+        </button>
+      </div>
+
+      {/* Recent transactions */}
+      <div style={{ padding: "22px 16px 0" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <span style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 14, color: T.paper }}>Recent Transactions</span>
+          <button onClick={() => setWalletPage("history")} style={{ background: "none", border: "none", color: T.goldBright, cursor: "pointer", fontSize: 12, fontFamily: FONT_HEAD, fontWeight: 600, display: "flex", alignItems: "center", gap: 2 }}>
+            View all <ChevronRight size={14} />
+          </button>
+        </div>
+        <div style={{ background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 14, overflow: "hidden" }}>
+          {displayTxns.slice(0, 5).map((tx, i) => {
+            const isPos = (tx.amount || 0) > 0;
+            return (
+              <div key={tx.id || i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", borderBottom: i < Math.min(displayTxns.length, 5) - 1 ? `1px solid ${T.cardBorder}` : "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 40, height: 40, borderRadius: "50%", background: isPos ? `rgba(244,211,94,0.12)` : `rgba(176,96,74,0.12)`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {isPos ? <ArrowUpCircle size={18} color={T.gold} /> : <ArrowDownCircle size={18} color={T.rust} />}
+                  </div>
+                  <div>
+                    <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: T.paper }}>{tx.type}</div>
+                    <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{tx.description || ""} · {fmtDate(tx.created_at)}</div>
+                  </div>
+                </div>
+                <div style={{ fontFamily: FONT_HEAD, fontWeight: 700, fontSize: 13, color: isPos ? T.goldBright : T.rust }}>
+                  {isPos ? "+" : ""}{fmtGHS(Math.abs(tx.amount || 0))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HeaderAvatar({ account, morePage, T }) {
+  const [url, setUrl] = React.useState(null);
+  const [loaded, setLoaded] = React.useState(false);
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const fn = (t) => setTick(t);
+    _avatarRefreshListeners.add(fn);
+    return () => _avatarRefreshListeners.delete(fn);
+  }, []);
+  React.useEffect(() => {
+    if (!account?.id) return;
+    supabase.from("public_profiles").select("avatar_url").eq("id", account.id).single()
+      .then(({ data }) => { if (data?.avatar_url) setUrl(data.avatar_url); setLoaded(true); })
+      .catch(() => { setLoaded(true); });
+  }, [account?.id, tick]);
+  // Show neutral circle while fetching — no email-derived initial during load
+  if (!loaded) return <div style={{ width:42, height:42, borderRadius:"50%", background:T.cardBorder }} />;
+  const initial = (account?.email || "?")[0].toUpperCase();
+  return url
+    ? <img src={url} alt="me" style={{ width:42, height:42, borderRadius:"50%", objectFit:"cover", border:`2px solid ${T.gold}` }} />
+    : <div style={{ width:42, height:42, borderRadius:"50%", background:T.goldGradient, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:FONT_HEAD, fontWeight:800, fontSize:16, color:T.ink }}>{initial}</div>;
+}
+
+export function ReferralRewardsScreen({ count, earnings, referralCode, onBack, onActivity, transitionStyle }) {
+  const animationRef = useRef(null);
+  const [referralsEnabled, setReferralsEnabled] = useState(false);
+  useEffect(() => {
+    if (!animationRef.current) return undefined;
+    const player = lottie.loadAnimation({ container: animationRef.current, renderer: "svg", loop: true, autoplay: true, animationData: referralAnimation });
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { player.destroy(); document.body.style.overflow = previousOverflow; };
+  }, []);
+  const close = () => onBack?.();
+  return createPortal(<div className="rx-referral-screen"
+    style={{position:"fixed",inset:0,zIndex:1000,overflow:"hidden",overscrollBehavior:"none",touchAction:"pan-y",background:"transparent",color:"#17191B",isolation:"isolate",contain:"layout paint",animation:"none"}}
+  >
+    
+    <div className="rx-referral-scroll" style={{position:"absolute",inset:0,overflowY:"auto",overflowX:"hidden",overscrollBehavior:"none",WebkitOverflowScrolling:"auto",touchAction:"pan-y"}}>
+    <div style={{maxWidth:480,minHeight:"100dvh",margin:"0 auto",padding:"10px 22px 34px",boxSizing:"border-box",background:"#FFFFFF",willChange:"transform",...transitionStyle}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:48,position:"relative",marginBottom:2}}>
+        <button onClick={close} aria-label="Back" style={{position:"absolute",left:-8,width:42,height:42,border:0,background:"transparent",display:"grid",placeItems:"center",color:"#17191B",cursor:"pointer",padding:0}}>
+          <ChevronLeft size={28} strokeWidth={2.2}/>
+        </button>
+        <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:19}}>Refer &amp; Earn</div>
+        <button type="button" onClick={() => { onActivity() }} aria-label="View referrals" style={{position:"absolute",right:-2,width:34,height:34,borderRadius:"50%",border:0,background:"#17191B",display:"grid",placeItems:"center",cursor:"pointer"}}><Coins size={17} color="#FFFFFF" strokeWidth={2}/></button>
+      </div>
+      <div ref={animationRef} aria-label="Creator rewards animation" style={{width:"100%",height:205,margin:"0 auto 2px"}}/>
+      <h1 style={{textAlign:"center",fontFamily:FONT_HEAD,fontWeight:900,fontSize:26,lineHeight:1.12,margin:"12px auto 8px",maxWidth:360}}>Refer Friends, They Subscribe.<br/><span style={{color:"#F4D35E"}}>You Earn!</span></h1>
+      <p style={{textAlign:"center",color:"#596269",fontSize:13,lineHeight:1.55,margin:"0 auto 24px",maxWidth:330}}>Invite friends to join and earn a percentage when they subscribe to a package.</p>
+      <img src={referralEarningsTransparent} alt="Creators earning rewards together" draggable="false" style={{display:"block",width:"100%",height:190,objectFit:"contain",margin:"2px auto 16px"}}/>
+      <h2 style={{fontFamily:FONT_HEAD,fontWeight:900,fontSize:21,lineHeight:1.15,margin:"0 0 8px"}}>Share More. Earn More.</h2>
+      <p style={{color:"#596269",fontSize:13,lineHeight:1.6,margin:"0 0 22px"}}>Earn rewards when your referrals subscribe, with every successful referral adding to your earnings.</p>
+      <img src={referralNetworkOptimized} alt="Friends building a network together" draggable="false" style={{display:"block",width:"100%",height:245,objectFit:"contain",margin:"0 auto 16px"}}/>
+      <h2 style={{fontFamily:FONT_HEAD,fontWeight:900,fontSize:21,lineHeight:1.15,margin:"0 0 8px"}}>Your Friends. Your Network. Your Rewards.</h2>
+      <p style={{color:"#596269",fontSize:13,lineHeight:1.6,margin:"0 0 15px"}}>Build your network, earn together, and celebrate every successful referral.</p>
+      <div style={{color:"#596269",fontSize:13,lineHeight:1.8,marginBottom:18}}>
+        <div>GHS 150 package — <strong style={{color:"#F4D35E"}}>10% earned</strong></div>
+        <div>GHS 500 package — <strong style={{color:"#F4D35E"}}>15% earned</strong></div>
+        <div>GHS 6,000 package — <strong style={{color:"#F4D35E"}}>20% earned</strong></div>
+      </div>
+      <button type="button" onClick={() => { if (referralCode) navigator.clipboard?.writeText(`https://rainx.app/?ref=${referralCode}`); }} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",border:"1px solid #E6E6E6",borderRadius:13,padding:"13px 14px",background:"#FFFFFF",textAlign:"left",cursor:referralCode?"pointer":"default",marginBottom:18}}>
+        <span><span style={{display:"block",fontFamily:FONT_HEAD,fontWeight:800,fontSize:14}}>Referral code</span><span style={{display:"block",color:"#747B80",fontSize:11.5,marginTop:3}}>{referralCode || "Code being prepared"}</span></span>
+        <span style={{display:"inline-flex",alignItems:"center",gap:6,color:"#F4D35E",fontFamily:FONT_HEAD,fontWeight:800,fontSize:12}}><Copy size={17}/>Copy</span>
+      </button>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",borderTop:"1px solid #ECECEC",paddingTop:16}}>
+        <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:15}}>Referrals</div>
+        <label className={referralsEnabled ? "is-on" : ""} style={{position:"relative",width:52,height:32,display:"inline-block"}}>
+          <input type="checkbox" checked={referralsEnabled} onChange={(event) => setReferralsEnabled(event.target.checked)} style={{opacity:0,width:0,height:0}}/>
+          <span className="referralToggle" style={{position:"absolute",inset:0,borderRadius:999,background:referralsEnabled?"#F4D35E":"#D7DADD",transition:"background .46s cubic-bezier(.22,1,.36,1)",cursor:"pointer"}}/>
+        </label>
+      </div>
+      <style>{`@keyframes referral-toggle-on{0%{left:3px;width:26px;border-radius:50%}34%{left:3px;width:34px;border-radius:13px}70%{left:15px;width:34px;border-radius:13px}100%{left:23px;width:26px;border-radius:50%}}@keyframes referral-toggle-off{0%{left:23px;width:26px;border-radius:50%}30%{left:15px;width:34px;border-radius:13px}66%{left:3px;width:34px;border-radius:13px}100%{left:3px;width:26px;border-radius:50%}}.referralToggle:after{content:"";position:absolute;width:26px;height:26px;left:3px;top:3px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(0,0,0,.18);animation:referral-toggle-off .62s cubic-bezier(.22,1,.36,1) both}label.is-on .referralToggle:after{animation:referral-toggle-on .72s cubic-bezier(.22,1,.36,1) both}`}</style>
+    </div>
+    </div>
+  </div>, document.body);
+}
+
+export function MyReferralsScreen({ count, earnings, referralCode, account, onBack, onActivity, transitionStyle }) {
+  const [rows,setRows]=useState([]); const [refreshKey,setRefreshKey]=useState(0); const [page,setPage]=useState(0); const [claimed,setClaimed]=useState(() => new Set());  const [swipePage,setSwipePage]=useState(null); const [tabMetrics,setTabMetrics]=useState([]); const touch=useRef(null); const tabStrip=useRef(null); const tabRefs=useRef([]);
+  useEffect(() => { let alive=true; supabase.from("referrals").select("*").eq("referrer_id",account?.id).order("created_at",{ascending:false}).then(async ({data}) => { const source=data||[]; const ids=[...new Set(source.map(row=>row.referred_id||row.referred_user_id||row.user_id).filter(Boolean))]; let profiles={}; if(ids.length){const result=await supabase.from("profiles").select("id,full_name,username").in("id",ids); profiles=Object.fromEntries((result.data||[]).map(profile=>[profile.id,profile]));} if(alive)setRows(source.map(row=>({...row,profile:profiles[row.referred_id||row.referred_user_id||row.user_id]}))); }).catch(()=>{}); return () => {alive=false}; },[account?.id,refreshKey]);
+  const demo=[{name:"Sarah Smith",detail:"Subscribed",plan:"Monthly",date:"Today 10:42am",amount:24,tone:"#DCA07A"},{name:"Mark Malbert",detail:"Subscribed",plan:"Yearly",date:"Yesterday",amount:999.5,tone:"#BC815B"},{name:"Desmond Banful",detail:"Subscribed",plan:"Monthly",date:"12 Dec. 2026",amount:100,tone:"#35C874"}];
+  const real=rows.length>0, all=real?rows:demo, paid=row=>["qualified","active","paid","subscribed"].includes(String(row.status||"").toLowerCase()), active=all.filter(row=>!real||paid(row)); const total=real?rows.reduce((sum,row)=>sum+Number(row.reward_amount??row.earnings??row.amount??row.commission??0),0):1123.5; const shown=page===0?all:page===1?active:[];
+  const date=value=>{if(!value)return "Recently"; const d=new Date(value),today=new Date(); if(d.toDateString()===today.toDateString())return "Today "+d.toLocaleTimeString([],{hour:"numeric",minute:"2-digit"}); const y=new Date(today); y.setDate(today.getDate()-1); if(d.toDateString()===y.toDateString())return "Yesterday"; return d.toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"});};
+  const close=()=>onBack?.(); const measureTabs=()=>{const base=tabStrip.current?.getBoundingClientRect();if(!base)return;setTabMetrics(tabRefs.current.map(el=>{const r=el?.getBoundingClientRect();return r?{left:r.left-base.left,width:r.width}:null;}));}; useEffect(()=>{measureTabs();window.addEventListener("resize",measureTabs);return()=>window.removeEventListener("resize",measureTabs);},[]); const startSwipe=e=>{if(e.touches.length===1)touch.current={x:e.touches[0].clientX,y:e.touches[0].clientY};}; const moveSwipe=e=>{if(!touch.current)return;const dx=e.touches[0].clientX-touch.current.x,dy=e.touches[0].clientY-touch.current.y;if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>8){const w=e.currentTarget.clientWidth;setSwipePage(Math.max(0,Math.min(2,page-dx/w)));}}; const endSwipe=e=>{if(!touch.current)return;const dx=e.changedTouches[0].clientX-touch.current.x,dy=e.changedTouches[0].clientY-touch.current.y;touch.current=null;if(Math.abs(dx)>Math.abs(dy)){const w=e.currentTarget.clientWidth;setPage(Math.max(0,Math.min(2,Math.round(page-dx/w))));}setSwipePage(null);};
+  const tabs=["All","Active referrals","Total earned"]; const rowView=(row,index)=>{const name=real?(row.profile?.full_name||row.profile?.username||"RainX member"):row.name; const amount=real?Number(row.reward_amount??row.earnings??row.amount??row.commission??0):row.amount; const key=row.id||"demo-"+index; const isClaimed=claimed.has(key); return <div key={key} style={{minHeight:86,display:"grid",gridTemplateColumns:"40px minmax(0,1fr) 72px",columnGap:9,alignItems:"center",borderBottom:"1px solid #E7E8E9"}}><div style={{width:40,height:40,borderRadius:"50%",display:"grid",placeItems:"center",color:"#fff",fontSize:17,position:"relative",background:real?(paid(row)?"#35C874":"#BC815B"):row.tone}}>{name.charAt(0).toUpperCase()}<span style={{position:"absolute",width:7,height:7,border:"1.5px solid #fff",borderRadius:"50%",right:-1,bottom:2,background:real&&paid(row)?"#42B97D":"#E85A70"}}/></div><div style={{minWidth:0}}><div style={{display:"flex",alignItems:"baseline",gap:4,whiteSpace:"nowrap",overflow:"hidden"}}><span style={{fontSize:14.5,fontWeight:750}}>{name}</span><span style={{fontSize:13.5,color:"#777A7D"}}>{real?(paid(row)?"Subscribed":"Signed up"):row.detail}</span></div><span style={{display:"inline-flex",marginTop:6,padding:"4px 9px",borderRadius:14,background:"#111",color:"#fff",fontSize:12,fontWeight:650}}>{real?(row.subscription_plan||row.plan||row.package||"Subscription"):row.plan}</span><div style={{marginTop:5,color:"#A5A7A9",fontSize:12.5}}>{real?date(row.created_at||row.signup_date):row.date}</div></div><div style={{width:72,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}><button disabled={isClaimed} onClick={()=>setClaimed(previous=>{const next=new Set(previous);next.add(key);return next})} style={{width:64,height:34,border:0,borderRadius:17,background:"#F6C83F",color:"#fff",fontSize:13,fontWeight:800}}>{isClaimed?"Claimed":"Claim"}</button><span style={{fontSize:13,fontWeight:750,whiteSpace:"nowrap"}}>GHS {amount.toFixed(2)}</span></div></div>};
+  const visualPage=swipePage ?? page; const from=Math.floor(visualPage); const to=Math.min(2,from+1); const mix=visualPage-from; const fallback=[{left:0,width:42},{left:52,width:112},{left:174,width:88}]; const metrics=tabMetrics.length===3?tabMetrics:fallback; const left=metrics[from].left+(metrics[to].left-metrics[from].left)*mix; const width=metrics[from].width+(metrics[to].width-metrics[from].width)*mix;
+  return createPortal(<><div style={{position:"fixed",inset:0,zIndex:1000,background:"transparent",overflow:"hidden",color:"#17191B",fontFamily:"-apple-system,BlinkMacSystemFont,\"SF Pro Display\",\"SF Pro Text\",Arial,sans-serif",...transitionStyle}}><div style={{width:"100%",height:"100%",maxWidth:760,margin:"auto",background:"#FCFDFD",display:"flex",flexDirection:"column",overflow:"hidden"}}><header style={{height:58,minHeight:58,background:"#fff",display:"flex",alignItems:"center",justifyContent:"center",position:"relative"}}><button onClick={close} aria-label="Back" style={{position:"absolute",left:14,width:36,height:36,border:0,background:"none"}}><ChevronLeft size={22}/></button><div style={{fontSize:23,fontWeight:750}}>My Referrals</div></header><main onTouchStart={startSwipe} onTouchMove={moveSwipe} onTouchEnd={endSwipe} style={{flex:1,minHeight:0,overflowY:"auto",overscrollBehaviorY:"none",padding:"28px 28px 24px"}}><div style={{width:"100%",height:190,borderRadius:24,overflow:"hidden",boxShadow:"0 6px 14px rgba(30,35,38,.07)"}}><img src={referralActivityBanner} alt="Earn from referrals" style={{width:"100%",height:"100%",display:"block",objectFit:"cover"}}/></div><button type="button" onClick={()=>{onActivity("performance")}} style={{width:"100%",height:48,marginTop:20,border:0,borderRadius:24,color:"#fff",background:"#3B3B3C",fontSize:17,fontWeight:700}}>Performance</button><div ref={tabStrip} style={{position:"relative",marginTop:24,overflow:"hidden"}}><div style={{height:48,display:"flex",alignItems:"center",gap:10,borderBottom:"1px solid #E7E8E9",position:"relative"}}><div style={{position:"absolute",left:left,top:4,width:width,height:40,borderRadius:20,background:"#EEF0F2",transition:swipePage===null?"left 520ms cubic-bezier(.22,1,.36,1),width 520ms cubic-bezier(.22,1,.36,1)":"none",pointerEvents:"none"}}/>{tabs.map((tab,index)=><button ref={el=>tabRefs.current[index]=el} key={tab} onClick={()=>setPage(index)} style={{position:"relative",zIndex:1,height:40,padding:"0 10px",border:0,background:"transparent",color:page===index?"#17191B":"#A7A9AC",fontSize:14.5,fontWeight:page===index?700:500,whiteSpace:"nowrap"}}>{tab}</button>)}<button aria-label="Refresh" onClick={()=>setRefreshKey(v=>v+1)} style={{position:"relative",zIndex:1,marginLeft:"auto",height:42,border:0,background:"none"}}><RefreshCw size={20}/></button></div><div style={{display:"flex",width:"300%",transform:"translate3d("+(-visualPage*33.3333)+"%,0,0)",transition:swipePage===null?"transform 520ms cubic-bezier(.22,1,.36,1)":"none"}}><section style={{flex:"0 0 33.3333%",paddingTop:4}}>{shown.map(rowView)}</section><section style={{flex:"0 0 33.3333%",paddingTop:4}}>{active.map(rowView)}</section><section style={{flex:"0 0 33.3333%"}}><div style={{marginTop:18,padding:18,borderRadius:18,background:"#F3F4F4",display:"flex",flexDirection:"column",gap:5}}><span style={{fontSize:13,color:"#8D9092"}}>Total earned</span><strong style={{fontSize:22}}>GHS {total.toFixed(2)}</strong></div></section></div></div></main></div></div></>,document.body);
+}
+export function ReferralPerformanceScreen({ onBack, transitionStyle }) {
+  const close = () => onBack?.();
+  return createPortal(<><div style={{position:"fixed",inset:0,zIndex:1001,...transitionStyle,background:"transparent",overflow:"hidden",fontFamily:"-apple-system,BlinkMacSystemFont,\"SF Pro Text\",Arial,sans-serif",color:"#17191B"}}><div style={{width:"100%",height:"100%",maxWidth:760,margin:"auto",background:"#FCFDFD",overflowY:"auto",overscrollBehaviorY:"none"}}><header style={{height:58,display:"flex",alignItems:"center",justifyContent:"center",position:"relative",background:"#fff"}}><button onClick={close} aria-label="Back" style={{position:"absolute",left:14,border:0,background:"none",fontSize:28,lineHeight:1}}>‹</button><strong style={{fontSize:16}}>Analytics</strong></header><div style={{padding:"8px 10px 28px"}}><div style={{height:42,display:"flex",alignItems:"center",justifyContent:"space-around",fontSize:12,borderBottom:"1px solid #F0F1F2"}}>{["Views","Earnings","Engagement","Audience"].map((x,i)=><span key={x} style={{padding:"9px 11px",borderRadius:14,background:i===1?"#FFF4C7":"transparent",color:i===1?"#1D5DA8":"#17191B",fontWeight:i===1?700:500}}>{x}</span>)}</div><div style={{display:"flex",gap:8,margin:"10px 0 16px"}}>{["Last 28 days⌄","Overview⌄"].map(x=><button key={x} style={{border:0,borderRadius:5,padding:"7px 10px",background:"#F1F2F3",fontSize:12,fontWeight:600}}>{x}</button>)}</div><div style={{fontSize:16,fontWeight:800}}>GHS 1,450 Approximate earnings ⓘ</div><div style={{fontSize:10,color:"#43824E",marginTop:3}}>+70% from previous 28 days</div><svg viewBox="0 0 300 150" style={{display:"block",width:"100%",height:190,marginTop:8}}><path d="M0 30H300M0 70H300M0 110H300" stroke="#EFF0F1"/><path d="M0 78 C18 72 20 100 35 106 S58 110 70 94 S89 90 102 100 S117 72 130 102 S145 10 155 86 S177 112 194 108 S218 115 232 96 S243 117 254 108 S278 116 300 110" fill="none" stroke="#E7B928" strokeWidth="3"/><path d="M0 78 C18 72 20 100 35 106 S58 110 70 94 S89 90 102 100 S117 72 130 102 S145 10 155 86 S177 112 194 108 S218 115 232 96 S243 117 254 108 S278 116 300 110 L300 150 L0 150Z" fill="#FFF7D5" opacity=".7"/></svg><div style={{borderTop:"1px solid #E9EAEB",paddingTop:14,fontSize:16,fontWeight:800}}>Earnings breakdown ⓘ</div><div style={{display:"flex",gap:14,marginTop:10,fontSize:12}}><span style={{padding:"8px 12px",borderRadius:14,background:"#FFF4C7",color:"#1D5DA8",fontWeight:700}}>Media</span><span style={{padding:"8px 12px"}}>Program</span></div><div style={{display:"flex",alignItems:"center",gap:22,marginTop:18}}><div style={{width:92,height:92,borderRadius:"50%",background:"conic-gradient(#F4D35E 0 70%,#A9D8F2 70% 90%,#2D6FAE 90% 100%)",position:"relative"}}><div style={{position:"absolute",inset:20,borderRadius:"50%",background:"#FCFDFD"}}/></div><div style={{fontSize:11,lineHeight:1.65}}><div><b>70%</b> GHS 1,015.00<br/><span style={{color:"#2D6FAE"}}>● Weekly subscriptions</span></div><div><b>20%</b> GHS 290.00<br/><span style={{color:"#A9A12A"}}>● Referral bonuses</span></div><div><b>10%</b> GHS 145.00<br/><span style={{color:"#2D6FAE"}}>● Other</span></div></div></div><div style={{marginTop:22,padding:14,borderRadius:12,background:"#FFF7D5",fontSize:13}}>Most referrals came from weekly subscriptions during this period.</div></div></div></div></>,document.body);
+}
+
+function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogout, onLogoutConfirm, setTab, entitlement, themeMode, setThemeMode, morePage, setMorePage, setProfileFromHeader, activeMarkets = [] }) {
+  // morePage/setMorePage lifted to MainAppContent so sidebar can deep-link
+  const [username, setUsername] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [bio, setBio] = useState("");
+  const [profileMsg, setProfileMsg] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [profileLoaded, setProfileLoaded] = useState(false);
+  const [benefits, setBenefits] = useState(DEFAULT_BENEFITS);
+  const [verification, setVerification] = useState(null);
+  const [showLegal, setShowLegal] = useState(false);
+  const [showInstallHelp, setShowInstallHelp] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+
+  // Security + Settings preferences are intentionally local to this app shell so
+  // these controls can be added without changing the existing community, signal,
+  // wallet, creator-space or home implementations.
+  const [securityPrefs, setSecurityPrefs] = useState(() => {
+    try { return JSON.parse(lsGet("rainx-security-prefs") || "{}"); } catch { return {}; }
+  });
+  const [securitySheet, setSecuritySheet] = useState(null);
+  const [pinValue, setPinValue] = useState("");
+  const [pinConfirm, setPinConfirm] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [enableBiometricAfterPin, setEnableBiometricAfterPin] = useState(false);
+  const [settingsPrefs, setSettingsPrefs] = useState(() => {
+    try { return JSON.parse(lsGet("rainx-settings-prefs") || "{}"); } catch { return {}; }
+  });
+  const [settingsSheet, setSettingsSheet] = useState(null);
+  const [accountSettingsLoaded, setAccountSettingsLoaded] = useState(false);
+  const [securitySessions, setSecuritySessions] = useState([]);
+  const [securitySessionsLoading, setSecuritySessionsLoading] = useState(false);
+  const [loginHistoryRows, setLoginHistoryRows] = useState([]);
+  const [loginHistoryLoading, setLoginHistoryLoading] = useState(false);
+  const [recoveryCodes, setRecoveryCodes] = useState([]);
+  const [twoFactorFactor, setTwoFactorFactor] = useState(null);
+  const [twoFactorEnrollment, setTwoFactorEnrollment] = useState(null);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [twoFactorLoading, setTwoFactorLoading] = useState(false);
+  const [blockedUsers, setBlockedUsers] = useState([]);
+  const [mutedUsers, setMutedUsers] = useState([]);
+  const [blockedLoading, setBlockedLoading] = useState(false);
+  const loadBlockedAndMuted = useCallback(async () => {
+    if (!account?.id) return;
+    setBlockedLoading(true);
+    try {
+      const [{ data: blocked }, { data: muted }] = await Promise.all([
+        supabase.from("user_blocks").select("blocked_id,created_at").eq("blocker_id", account.id).order("created_at", { ascending:false }),
+        supabase.from("user_mutes").select("muted_id,created_at").eq("muter_id", account.id).order("created_at", { ascending:false }),
       ]);
+      const blockedIds = (blocked || []).map(r => r.blocked_id).filter(Boolean);
+      const mutedIds = (muted || []).map(r => r.muted_id).filter(Boolean);
+      const ids = [...new Set([...blockedIds, ...mutedIds])];
+      let profileMap = {};
+      if (ids.length) {
+        const { data: pub } = await supabase.from("public_profiles").select("id,display_name,full_name,username,avatar_url,badge,is_admin").in("id", ids);
+        (pub || []).forEach(p => { profileMap[p.id] = p; });
+        const missing = ids.filter(id => !profileMap[id]);
+        if (missing.length) {
+          const { data: priv } = await supabase.from("profiles").select("id,display_name,full_name,username,avatar_url,badge,is_admin").in("id", missing);
+          (priv || []).forEach(p => { profileMap[p.id] = p; });
+        }
+      }
+      setBlockedUsers(blockedIds.map(id => ({ id, profile: profileMap[id] || null })));
+      setMutedUsers(mutedIds.map(id => ({ id, profile: profileMap[id] || null })));
+    } finally { setBlockedLoading(false); }
+  }, [account?.id]);
+  useEffect(() => { if (settingsSheet === "blockedUsers") loadBlockedAndMuted(); }, [settingsSheet, loadBlockedAndMuted]);
+  const [postVisibility, setPostVisibility] = useState(() => lsGet("rainx-post-visibility") || "public");
+
+  const persistSecurity = (patch) => {
+    setSecurityPrefs(prev => {
+      const next = { ...prev, ...patch };
+      lsSet("rainx-security-prefs", JSON.stringify(next));
+      // Never send device PIN hashes or biometric credential IDs to the account backend.
+      const backendSafe = { ...next };
+      delete backendSafe.pinHash;
+      delete backendSafe.biometricCredentialId;
+      if (account?.id) {
+        supabase.from("account_settings").upsert({
+          user_id: account.id,
+          settings: settingsPrefs,
+          security_prefs: backendSafe,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
+      }
+      return next;
+    });
+  };
+  const persistSettings = (patch) => {
+    setSettingsPrefs(prev => {
+      const next = { ...prev, ...patch };
+      lsSet("rainx-settings-prefs", JSON.stringify(next));
+      if (account?.id) {
+        supabase.from("account_settings").upsert({
+          user_id: account.id,
+          settings: next,
+          security_prefs: securityPrefs,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" }).then(() => {}).catch(() => {});
+      }
+      return next;
+    });
+  };
+  useEffect(() => {
+    if (!account?.id) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.from("account_settings").select("settings,security_prefs").eq("user_id", account.id).maybeSingle();
       if (cancelled) return;
-      setAccountPhone(authUser?.user?.phone || "");
-      const lockConfig = await getNativeLockConfig(account.id).catch(() => null);
-      if (cancelled) return;
-      if (!error && data?.settings && typeof data.settings === "object") {
-        setSettingsPrefs(prev => {
-          const next = { ...prev, ...data.settings };
-          if (next.postVisibility) setPostVisibility(next.postVisibility);
-          if (next.theme && ["light", "dark", "system"].includes(next.theme)) setThemeMode(next.theme);
+      const nativeConfig = await getNativeLockConfig(account.id).catch(() => null);
+      if (!error && data) {
+        if (data.settings && typeof data.settings === "object") {
+          setSettingsPrefs(prev => {
+            const next = { ...prev, ...data.settings };
+            lsSet("rainx-settings-prefs", JSON.stringify(next));
+            if (next.postVisibility) setPostVisibility(next.postVisibility);
+            if (next.theme && ["light", "dark", "system"].includes(next.theme)) {
+              setThemeMode(next.theme);
+              lsSet("rainx-theme", next.theme);
+            }
+            return next;
+          });
+        }
+        if (data.security_prefs && typeof data.security_prefs === "object") {
+          setSecurityPrefs(prev => {
+            const next = {
+              ...prev,
+              ...data.security_prefs,
+              ...(nativeConfig ? {
+                pinEnabled: nativeConfig.pinEnabled,
+                appLock: nativeConfig.appLock,
+                biometricEnabled: nativeConfig.biometricEnabled,
+                pinLength: nativeConfig.pinLength,
+              } : {}),
+            };
+            lsSet("rainx-security-prefs", JSON.stringify(next));
+            return next;
+          });
+        }
+      }
+      if (nativeConfig && (!data?.security_prefs || error)) {
+        setSecurityPrefs(prev => {
+          const next = {
+            ...prev,
+            pinEnabled: nativeConfig.pinEnabled,
+            appLock: nativeConfig.appLock,
+            biometricEnabled: nativeConfig.biometricEnabled,
+            pinLength: nativeConfig.pinLength,
+          };
+          lsSet("rainx-security-prefs", JSON.stringify(next));
           return next;
         });
       }
-      const serverSecurity = data?.security_prefs && typeof data.security_prefs === "object" ? { ...data.security_prefs } : {};
-      delete serverSecurity.pinHash;
-      delete serverSecurity.biometricCredentialId;
-      if (lockConfig) {
-        serverSecurity.pinEnabled = lockConfig.pinEnabled;
-        serverSecurity.appLock = lockConfig.appLock;
-        serverSecurity.biometricEnabled = lockConfig.biometricEnabled;
-        serverSecurity.pinLength = lockConfig.pinLength;
-      }
-      setSecurityPrefs(serverSecurity);
       setAccountSettingsLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -2425,33 +5769,9 @@ function MainAppContent({ account, onLogout }) {
 
   useEffect(() => { refreshTwoFactor(); }, [refreshTwoFactor]);
 
-  const copySecurityText = async (text, label) => {
-    try {
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
-      else {
-        const area = document.createElement("textarea");
-        area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
-        document.body.appendChild(area); area.focus(); area.select(); document.execCommand("copy"); area.remove();
-      }
-      alert(label + " copied.");
-    } catch { alert("Could not copy " + label.toLowerCase() + "."); }
-  };
-
   const beginTwoFactorEnrollment = async () => {
     setTwoFactorLoading(true);
     try {
-      const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
-      if (factorsError) throw factorsError;
-      const existing = factors?.totp || [];
-      const verified = existing.find(factor => factor.status === "verified");
-      if (verified) {
-        setTwoFactorFactor(verified);
-        alert("Two-step authentication is already enabled for this account.");
-        return;
-      }
-      for (const factor of existing.filter(item => item.status !== "verified")) {
-        await supabase.auth.mfa.unenroll({ factorId: factor.id });
-      }
       const { data, error } = await supabase.auth.mfa.enroll({
         factorType: "totp",
         friendlyName: "RainX Authenticator",
@@ -2509,6 +5829,11 @@ function MainAppContent({ account, onLogout }) {
     loadSecuritySessions().finally(() => setLoginHistoryLoading(false));
   }, [settingsSheet, loadSecuritySessions]);
 
+  const hashPin = async (pin) => {
+    const bytes = new TextEncoder().encode(pin);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+  };
   const setupPin = async () => {
     setPinError("");
     if (!/^\d{4,6}$/.test(pinValue)) { setPinError("Enter a 4–6 digit PIN."); return; }
@@ -2527,33 +5852,10 @@ function MainAppContent({ account, onLogout }) {
       }
       setPinValue(""); setPinConfirm(""); setSecuritySheet(null);
     } catch (error) {
-      setPinError(error?.message || "Unable to save PIN securely.");
+      setPinError(error?.message || "Unable to save PIN on this device.");
     }
   };
-  const requestSecurityEmail = async (action) => {
-    if (!account?.email) { alert("A verified account email is required for this security change."); return; }
-    if (typeof supabase.auth.reauthenticate !== "function") {
-      const { error } = await supabase.auth.resetPasswordForEmail(account.email);
-      alert(error ? "Could not send the security email." : "A security email was sent. Complete it, then retry this change.");
-      return;
-    }
-    setSecurityEmailLoading(true);
-    try {
-      const { error } = await supabase.auth.reauthenticate();
-      if (error) throw error;
-      setSecurityReauthAction(action);
-      setSecurityEmailCode("");
-      setSecuritySheet("securityReauth");
-    } catch (error) {
-      alert(error?.message || "Could not send the security verification email.");
-    } finally { setSecurityEmailLoading(false); }
-  };
-
-  const setupPasskey = async (reauthenticated = false) => {
-    if (!reauthenticated && securityPrefs.biometricEnabled) {
-      await requestSecurityEmail("biometric");
-      return;
-    }
+  const setupPasskey = async () => {
     try {
       const deviceConfig = await getNativeLockConfig(account?.id).catch(() => null);
       if (!deviceConfig?.pinEnabled) {
@@ -2597,11 +5899,7 @@ function MainAppContent({ account, onLogout }) {
       if (e?.name !== "NotAllowedError") alert(e?.message || "Face ID / passkey setup could not be completed.");
     }
   };
-  const disableBiometric = async (reauthenticated = false) => {
-    if (!reauthenticated && securityPrefs.biometricEnabled) {
-      await requestSecurityEmail("biometricDisable");
-      return;
-    }
+  const disableBiometric = async () => {
     try {
       if (Capacitor.isNativePlatform()) await setNativeBiometricEnabled(false, account?.id);
       persistSecurity({ biometricEnabled: false, appLock: securityPrefs.pinEnabled ? securityPrefs.appLock : false });
@@ -2609,49 +5907,6 @@ function MainAppContent({ account, onLogout }) {
       alert(error?.message || "Unable to disable biometric unlock.");
     }
   };
-  const completeSecurityReauth = async () => {
-    if (!/^\d{6}$/.test(securityEmailCode) || !securityReauthAction) {
-      alert("Enter the 6-digit code from your email.");
-      return;
-    }
-    setSecurityEmailLoading(true);
-    try {
-      const { error } = await supabase.auth.verifyOtp({ email: account.email, token: securityEmailCode, type: "reauthentication" });
-      if (error) throw error;
-      const action = securityReauthAction;
-      setSecurityReauthAction(null); setSecurityEmailCode("");
-      if (action === "pin") {
-        setPinValue(""); setPinConfirm(""); setPinError(""); setSecuritySheet("pin");
-      } else if (action === "biometric") {
-        await setupPasskey(true);
-      } else if (action === "biometricDisable") {
-        await disableBiometric(true);
-      }
-    } catch (error) {
-      alert(error?.message || "That email verification code could not be verified.");
-    } finally { setSecurityEmailLoading(false); }
-  };
-
-  const sendPhoneVerification = async () => {
-    const normalized = phoneValue.trim().replace(/[^+\d]/g, "");
-    if (!/^\+[1-9]\d{7,14}$/.test(normalized)) {
-      alert("Enter a phone number in international format, for example +233…");
-      return;
-    }
-    const { error } = await supabase.auth.updateUser({ phone: normalized });
-    if (error) { alert(error.message || "Could not send the phone verification code."); return; }
-    setPhonePending(normalized); setPhoneCode("");
-    alert("Verification code sent to your phone.");
-  };
-
-  const verifyPhone = async () => {
-    if (!phonePending || !/^\d{6}$/.test(phoneCode)) { alert("Enter the 6-digit phone code."); return; }
-    const { error } = await supabase.auth.verifyOtp({ phone: phonePending, token: phoneCode, type: "phone_change" });
-    if (error) { alert(error.message || "That phone code could not be verified."); return; }
-    setAccountPhone(phonePending); setPhonePending(""); setPhoneCode("");
-    alert("Recovery phone verified.");
-  };
-
   const toggleAppLock = async () => {
     const enabled = !(securityPrefs.appLock ?? false);
     const deviceConfig = enabled ? await getNativeLockConfig(account?.id).catch(() => null) : null;
@@ -4024,7 +7279,7 @@ function MainAppContent({ account, onLogout }) {
         <LightSection title="Device security">
            <LightRow icon={Lock} title="App Lock" subtitle="Require device authentication before opening RainX" onPress={toggleAppLock} right={<LightToggle on={securityPrefs.appLock ?? false} onChange={toggleAppLock} />} />
           <LightDivider />
-          <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{if(securityPrefs.pinEnabled){requestSecurityEmail("pin");return;}setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
+          <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
           <LightDivider />
            <LightRow icon={Smartphone} title="Face ID / Device Passkey" subtitle={securityPrefs.biometricEnabled?"Biometric unlock is enabled on this device":"Use Face ID, fingerprint or device biometrics"} onPress={securityPrefs.biometricEnabled ? disableBiometric : setupPasskey} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.biometricEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.biometricEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.biometricEnabled?"DISABLE":"SET UP"}</span>} />
         </LightSection>
@@ -4074,12 +7329,6 @@ function MainAppContent({ account, onLogout }) {
         </LightSection>
 
         {securitySheet && <LightSheet onClose={()=>setSecuritySheet(null)}>
-           {securitySheet === "securityReauth" && <>
-             <LightSheetTitle title="Verify your email" desc="RainX sent a one-time code to your account email before this security change." />
-             <input value={securityEmailCode} onChange={event=>setSecurityEmailCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit email code" aria-label="Email verification code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} />
-             <button disabled={securityEmailLoading || securityEmailCode.length !== 6} onClick={completeSecurityReauth} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:(securityEmailLoading || securityEmailCode.length !== 6) ? .55 : 1}}>{securityEmailLoading?"VERIFYING…":"VERIFY & CONTINUE"}</button>
-           </>}
-
           {securitySheet === "twoFactor" && <>
              <LightSheetTitle title="Two-Step Authentication" desc={twoFactorFactor ? "Your authenticator app is verified for this account." : "Use an authenticator app to protect new sign-ins."} />
              {twoFactorFactor ? <>
@@ -4093,7 +7342,7 @@ function MainAppContent({ account, onLogout }) {
              </> : <>
                <div style={{fontSize:12,color:PREF_TEXT,lineHeight:1.55,marginBottom:10}}>Scan this QR code with Google Authenticator, Authy or another TOTP app, then enter the current 6-digit code.</div>
                {twoFactorEnrollment?.totp?.qr_code && <img src={twoFactorEnrollment.totp.qr_code} alt="RainX authenticator QR code" style={{display:"block",width:170,height:170,margin:"6px auto 12px",borderRadius:10,border:`1px solid ${PREF_BORDER}`,background:"#FFFFFF",padding:8}} />}
-                {twoFactorEnrollment?.totp?.secret && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:10,padding:"9px 10px",fontSize:10.5,color:PREF_MUTED,wordBreak:"break-all",marginBottom:12}}>Manual setup key:<div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}><strong style={{color:PREF_TEXT,flex:1}}>{twoFactorEnrollment.totp.secret}</strong><button type="button" onClick={()=>copySecurityText(twoFactorEnrollment.totp.secret,"Setup key")} style={{border:`1px solid ${PREF_BORDER}`,background:"#FFFFFF",borderRadius:8,padding:"6px 9px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontWeight:800,fontSize:10.5,cursor:"pointer",display:"inline-flex",alignItems:"center",gap:5}}><Copy size={13}/>Copy</button></div></div>}
+               {twoFactorEnrollment?.totp?.secret && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:10,padding:"9px 10px",fontSize:10.5,color:PREF_MUTED,wordBreak:"break-all",marginBottom:12}}>Manual setup key: <strong style={{color:PREF_TEXT}}>{twoFactorEnrollment.totp.secret}</strong></div>}
                <input value={twoFactorCode} onChange={event=>setTwoFactorCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} />
                <button disabled={twoFactorLoading || twoFactorCode.length !== 6} onClick={verifyTwoFactorEnrollment} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:(twoFactorLoading || twoFactorCode.length !== 6) ? .55 : 1}}>{twoFactorLoading?"VERIFYING…":"VERIFY & ENABLE"}</button>
              </>}
@@ -4102,18 +7351,11 @@ function MainAppContent({ account, onLogout }) {
             <LightSheetTitle title="Recovery methods" desc="Keep at least two trusted ways to regain access." />
             <LightRow icon={Mail} title="Account email" subtitle={account?.email || "Not available"} right={<span style={{fontSize:10,fontWeight:800,color:"#1A7A50"}}>VERIFIED</span>} />
             <LightDivider />
-             <LightRow icon={Smartphone} title="Verified phone" subtitle={accountPhone || "Add and verify a recovery phone number"} onPress={()=>{setPhoneValue(accountPhone);setPhoneCode("");setPhonePending("");setSecuritySheet("phoneRecovery")}} right={<span style={{fontSize:10,fontWeight:800,color:accountPhone?"#1A7A50":PREF_MUTED}}>{accountPhone?"VERIFIED":"SET UP"}</span>} />
+            <LightRow icon={Smartphone} title="Verified phone" subtitle="Add and verify a recovery phone number" onPress={()=>alert("Backend required: phone verification and recovery-factor storage.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
             <LightDivider />
              <LightRow icon={Key} title="Recovery codes" subtitle="Generate new one-time codes for account recovery" onPress={generateRecoveryCodes} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
              {recoveryCodes.length > 0 && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"11px 12px",fontFamily:"monospace",fontSize:12,lineHeight:1.8,color:PREF_TEXT}}>Save these codes now. They are shown only once:<br />{recoveryCodes.map(code=><div key={code}>{code}</div>)}</div>}
           </>}
-           {securitySheet === "phoneRecovery" && <>
-             <LightSheetTitle title="Verified phone" desc="Use an international phone number for recovery verification codes." />
-             <input value={phoneValue} onChange={event=>setPhoneValue(event.target.value.replace(/[^+\d\s()-]/g,"").slice(0,20))} inputMode="tel" autoComplete="tel" placeholder="+233 20 000 0000" aria-label="Recovery phone number" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:15,outline:"none",marginBottom:10}} />
-             <button onClick={sendPhoneVerification} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginBottom:12}}>SEND PHONE CODE</button>
-             {phonePending && <><input value={phoneCode} onChange={event=>setPhoneCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit phone code" aria-label="Phone verification code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} /><button onClick={verifyPhone} disabled={phoneCode.length!==6} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:phoneCode.length!==6?.55:1}}>VERIFY PHONE</button></>}
-           </>}
-
           {securitySheet === "loginHistory" && <>
             <LightSheetTitle title="Login history" desc="Recent RainX sign-ins and the devices currently holding sessions." />
             {loginHistoryLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading secure sign-in history…</div> : <>
@@ -4149,7 +7391,7 @@ function MainAppContent({ account, onLogout }) {
             <LightRow icon={FileCheck} title="Moderation & reports" subtitle="Review token reports, takedowns and creator disputes" onPress={()=>alert("Backend required: moderation/report queue.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
           </>}
           {securitySheet === "pin" && <>
-             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed server-side and is never returned to the app."} />
+             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed before it is stored on this device."} />
             <input value={pinValue} onChange={e=>setPinValue(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="New PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />
             <input value={pinConfirm} onChange={e=>setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Confirm PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
             {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
