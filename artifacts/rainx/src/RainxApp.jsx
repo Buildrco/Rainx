@@ -837,6 +837,42 @@ async function recordSecurityChange(eventType, title, body, metadata = {}) {
   } catch {}
 }
 
+function friendlyDeviceLabel(value) {
+  const ua = String(value || "");
+  if (/iPhone/i.test(ua)) return "iPhone";
+  if (/iPad/i.test(ua)) return "iPad";
+  if (/Android/i.test(ua)) {
+    const model = ua.match(/Android[^;)]*;\s*(?:[a-z]{2}-[a-z]{2};\s*)?([^;)]+?)(?:\s+Build[;/][^;)]*)?[;) ]/i)?.[1]?.trim();
+    return model && !/^wv$/i.test(model) ? `Android · ${model}` : "Android device";
+  }
+  if (/Macintosh|Mac OS X/i.test(ua)) return "Mac browser";
+  if (/Windows/i.test(ua)) return "Windows PC";
+  if (/Linux/i.test(ua)) return "Linux browser";
+  if (/Mozilla|Chrome|Safari|Firefox|Edge/i.test(ua)) return "Web browser";
+  return value || "RainX device";
+}
+
+function isPublicIp(value) {
+  const ip = String(value || "").trim();
+  if (!ip || ip === "127.0.0.1" || ip === "::1" || /^10\./.test(ip) || /^192\.168\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
+  return true;
+}
+
+async function addRealLocations(rows) {
+  return Promise.all((rows || []).map(async (row) => {
+    if (row.location || !isPublicIp(row.ip_address)) return row;
+    try {
+      const response = await fetch(`https://ipwho.is/${encodeURIComponent(row.ip_address)}`, { signal: AbortSignal.timeout(5000) });
+      const place = await response.json();
+      if (!place?.success) return row;
+      const location = [place.city, place.region, place.country].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(", ");
+      return location ? { ...row, location } : row;
+    } catch {
+      return row;
+    }
+  }));
+}
+
 // ---------- Candle-based signal engine ----------
 const TIMEFRAMES = [
   { key: "15m", td: "15min", label: "15 Minute" },
@@ -5782,8 +5818,8 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         supabase.rpc("get_my_auth_sessions"),
         supabase.rpc("get_my_login_history"),
       ]);
-      if (!sessionError) setSecuritySessions(sessionData || []);
-      if (!loginError) setLoginHistoryRows(loginData || []);
+      if (!sessionError) setSecuritySessions(await addRealLocations(sessionData || []));
+      if (!loginError) setLoginHistoryRows(await addRealLocations(loginData || []));
     } finally { setSecuritySessionsLoading(false); }
   }, [account?.id]);
 
@@ -7461,14 +7497,15 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             {loginHistoryLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading secure sign-in history…</div> : <>
               {loginHistoryRows.length === 0 && securitySessions.length === 0 && <div style={{padding:"12px 0",fontSize:12,color:PREF_MUTED}}>No recorded sign-in events yet.</div>}
               {loginHistoryRows.map((row) => {
-                const device = [row.device_name, row.platform, row.model].filter(Boolean).join(" · ") || "RainX device";
+                const rawDevice = [row.device_name, row.platform, row.model].filter(Boolean).join(" · ");
+                const device = /Mozilla|Chrome|Safari|Firefox|Edge/i.test(rawDevice) ? friendlyDeviceLabel(row.user_agent || rawDevice) : (rawDevice || friendlyDeviceLabel(row.user_agent));
                 return <div key={row.id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}>
                   <div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Activity}/><div style={{flex:1}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>Successful sign-in</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{new Date(row.created_at).toLocaleString()}</div></div><span style={{fontSize:9.5,fontWeight:800,color:"#1A7A50"}}>RECORDED</span></div>
                   <div style={{fontSize:10.5,color:PREF_MUTED,marginTop:8,lineHeight:1.55}}>{device}<br />IP: {row.ip_address || "Unavailable"} · Location: {row.location || "Unavailable"}<br />{row.user_agent || "User agent unavailable"}</div>
                 </div>;
               })}
               {securitySessions.length > 0 && <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:12,color:PREF_MUTED,margin:"14px 0 8px"}}>ACTIVE AUTH SESSIONS</div>}
-              {securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}><div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{s.user_agent ? s.user_agent.slice(0,72) : "RainX session"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.created_at ? new Date(s.created_at).toLocaleString() : ""} · IP: {s.ip_address || "Unavailable"} · Location: {s.location || "Unavailable"}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div></div>)}
+              {securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}><div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{friendlyDeviceLabel(s.user_agent)}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.created_at ? new Date(s.created_at).toLocaleString() : ""} · IP: {s.ip_address || "Unavailable"} · Location: {s.location || "Unavailable"}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div></div>)}
             </>}
           </>}
           {securitySheet === "reportSecurity" && <>
@@ -7506,7 +7543,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
            </>}
           {securitySheet === "sessions" && <>
             <LightSheetTitle title="Active Sessions" desc="Review devices currently signed in to RainX." />
-            {securitySessionsLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading sessions…</div> : securitySessions.length === 0 ? <div style={{padding:"10px 0",fontSize:12,color:PREF_MUTED}}>No active session details are available.</div> : securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"13px 14px",display:"flex",alignItems:"center",gap:12,marginBottom:8}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{s.user_agent ? s.user_agent.slice(0,72) : "RainX device"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.ip_address || "IP unavailable"} · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ""}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div>)}
+            {securitySessionsLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading sessions…</div> : securitySessions.length === 0 ? <div style={{padding:"10px 0",fontSize:12,color:PREF_MUTED}}>No active session details are available.</div> : securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"13px 14px",display:"flex",alignItems:"center",gap:12,marginBottom:8}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{friendlyDeviceLabel(s.user_agent)}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.ip_address || "IP unavailable"} · {s.location || "Location unavailable"} · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ""}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div>)}
           </>}
           {securitySheet === "appLockSetup" && <>
             <LightSheetTitle title="Set up App Lock" desc="RainX needs a PIN or device biometric before App Lock can be enabled." />
