@@ -34,6 +34,8 @@ export type NativeLockConfig = {
   biometricEnabled: boolean;
   pinLength: number;
   pinLengthKnown: boolean;
+  pinRegistrationRequired: boolean;
+  biometricRegistrationRequired: boolean;
 };
 
 const native = () => Capacitor.isNativePlatform();
@@ -103,6 +105,15 @@ async function resolveAccountId(accountId?: string) {
   } catch { return undefined; }
 }
 
+async function getBackendSecurityPrefs(accountId?: string) {
+  if (!accountId) return {};
+  try {
+    const { data } = await supabase.from("account_settings")
+      .select("security_prefs").eq("user_id", accountId).maybeSingle();
+    return data?.security_prefs && typeof data.security_prefs === "object" ? data.security_prefs : {};
+  } catch { return {}; }
+}
+
 async function migratePinStorage(accountId?: string) {
   if (!native() || !accountId) return;
   const accountKeys = keySet(accountId);
@@ -149,12 +160,18 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
     const hasStoredPin = typeof prefs.pinHash === "string" && prefs.pinHash.length > 0;
     const pinEnabled = prefs.pinEnabled === true && hasStoredPin;
     const biometricEnabled = prefs.biometricEnabled === true;
+    const backend = hasStoredPin ? {} : await getBackendSecurityPrefs(accountId);
+    const pinRegistrationRequired = !hasStoredPin && (
+      backend.pinEnabled === true || backend.biometricEnabled === true || backend.appLock === true
+    );
     return {
       pinEnabled,
-      appLock: prefs.appLock === true && (pinEnabled || biometricEnabled),
+      appLock: (prefs.appLock === true && (pinEnabled || biometricEnabled)) || pinRegistrationRequired,
       biometricEnabled,
       pinLength: Math.max(4, Math.min(6, Number(prefs.pinLength) || 4)),
       pinLengthKnown: true,
+      pinRegistrationRequired,
+      biometricRegistrationRequired: pinRegistrationRequired && backend.biometricEnabled === true,
     };
   }
 
@@ -179,13 +196,20 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
   // that can never accept credentials.
   const recoveredAppLock =
     appLock === "1" && (recoveredPinEnabled || recoveredBiometric);
+  const hasLocalConfig = [pinEnabled, appLock, biometricEnabled, pinLength, pinHash].some(value => value !== null);
+  const backend = hasLocalConfig ? {} : await getBackendSecurityPrefs(resolved);
+  const pinRegistrationRequired = !hasStoredPin && (
+    backend.pinEnabled === true || backend.biometricEnabled === true || backend.appLock === true
+  );
 
   return {
     pinEnabled: recoveredPinEnabled,
-    appLock: recoveredAppLock,
+    appLock: recoveredAppLock || pinRegistrationRequired,
     biometricEnabled: recoveredBiometric,
     pinLength: normalizedLength,
     pinLengthKnown,
+    pinRegistrationRequired,
+    biometricRegistrationRequired: pinRegistrationRequired && backend.biometricEnabled === true,
   };
 }
 
@@ -262,8 +286,8 @@ export async function disableNativePin(first: string, second?: string) {
 export async function setNativeAppLock(enabled: boolean, accountId?: string) {
   if (!native()) {
     const prefs = getBrowserSecurityPrefs();
-    if (enabled && !prefs.pinEnabled && !prefs.biometricEnabled) {
-      throw new Error("Set up a PIN or device biometric first.");
+    if (enabled && !prefs.pinEnabled) {
+      throw new Error("Set up a PIN before enabling App Lock.");
     }
     saveBrowserSecurityPrefs({ appLock: enabled });
     if (!enabled) clearNativeSessionUnlock();
@@ -274,8 +298,8 @@ export async function setNativeAppLock(enabled: boolean, accountId?: string) {
   if (!resolved) throw new Error("Your account session is not ready.");
 
   const config = await getNativeLockConfig(resolved);
-  if (enabled && !config.pinEnabled && !config.biometricEnabled) {
-    throw new Error("Set up a PIN or device biometric first.");
+  if (enabled && !config.pinEnabled) {
+    throw new Error("Set up a PIN before enabling App Lock.");
   }
 
   await secureSet(keySet(resolved).appLock, enabled ? "1" : "0");
@@ -290,6 +314,8 @@ export async function setNativeBiometricEnabled(enabled: boolean, accountId?: st
   const keys = keySet(resolved);
 
   if (enabled) {
+    const config = await getNativeLockConfig(resolved);
+    if (!config.pinEnabled) throw new Error("Set up a PIN before enabling biometric unlock.");
     const result = await BiometricAuth.checkBiometry();
     if (!result.isAvailable) {
       throw new Error("No app-usable biometric authentication is enrolled on this device.");
