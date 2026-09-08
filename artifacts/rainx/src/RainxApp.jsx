@@ -824,6 +824,17 @@ async function recordWebLoginEvent(userId) {
   } catch {}
 }
 
+async function recordSecurityChange(eventType, title, body, metadata = {}) {
+  try {
+    await supabase.rpc("record_my_security_change", {
+      p_event_type: eventType,
+      p_title: title,
+      p_body: body,
+      p_metadata: metadata,
+    });
+  } catch {}
+}
+
 // ---------- Candle-based signal engine ----------
 const TIMEFRAMES = [
   { key: "15m", td: "15min", label: "15 Minute" },
@@ -5820,6 +5831,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       setTwoFactorEnrollment(null);
       setTwoFactorCode("");
       persistSecurity({ twoFactorEnabled: true, twoFactorFactorId: twoFactorEnrollment.id });
+      recordSecurityChange("two_factor_changed", "Two-step authentication enabled", "Two-step authentication was enabled on your RainX account.", { enabled: true });
       alert("Two-step authentication is enabled.");
     } catch (error) {
       alert(error?.message || "That authenticator code could not be verified.");
@@ -5834,6 +5846,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       if (error) throw error;
       setTwoFactorFactor(null);
       persistSecurity({ twoFactorEnabled: false, twoFactorFactorId: undefined });
+      recordSecurityChange("two_factor_changed", "Two-step authentication disabled", "Two-step authentication was disabled on your RainX account.", { enabled: false });
       alert("Two-step authentication disabled.");
     } catch (error) {
       alert(error?.message || "Unable to disable two-step authentication.");
@@ -5895,6 +5908,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     try {
       await setNativeAppLock(false, account?.id);
       persistSecurity({ appLock: false });
+      recordSecurityChange("app_lock_changed", "App Lock disabled", "App Lock was disabled for RainX.", { enabled: false });
       setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
     } catch (error) {
       setPinError(error?.message || "Unable to disable App Lock.");
@@ -5911,6 +5925,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         try {
           await setNativeBiometricEnabled(true, account?.id);
           persistSecurity({ biometricEnabled: true, appLock: true });
+          recordSecurityChange("biometric_changed", "Biometric unlock enabled", "Face ID or fingerprint unlock was enabled for RainX.", { enabled: true });
         } catch (biometricError) {
           alert(biometricError?.message || "PIN saved. Biometric setup can be completed later.");
         }
@@ -5933,6 +5948,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       if (Capacitor.isNativePlatform()) {
         await setNativeBiometricEnabled(true, account?.id);
         persistSecurity({ biometricEnabled: true, appLock: true });
+        recordSecurityChange("biometric_changed", "Biometric unlock enabled", "Face ID or fingerprint unlock was enabled for RainX.", { enabled: true });
         return;
       }
       if (!("PublicKeyCredential" in window) || !navigator.credentials?.create) {
@@ -5960,6 +5976,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       if (credential?.rawId) {
         const id = btoa(String.fromCharCode(...new Uint8Array(credential.rawId)));
         persistSecurity({ biometricEnabled: true, biometricCredentialId: id, appLock: true });
+        recordSecurityChange("biometric_changed", "Biometric unlock enabled", "A device passkey was enabled for RainX.", { enabled: true });
       }
     } catch (e) {
       if (e?.name !== "NotAllowedError") alert(e?.message || "Face ID / passkey setup could not be completed.");
@@ -5970,6 +5987,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       if (!(await verifyCurrentPin())) return;
       if (Capacitor.isNativePlatform()) await setNativeBiometricEnabled(false, account?.id);
       persistSecurity({ biometricEnabled: false, appLock: securityPrefs.pinEnabled ? securityPrefs.appLock : false });
+      recordSecurityChange("biometric_changed", "Biometric unlock disabled", "Face ID, fingerprint or device passkey unlock was disabled for RainX.", { enabled: false });
       setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
     } catch (error) {
       alert(error?.message || "Unable to disable biometric unlock.");
@@ -5996,6 +6014,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       }
       if (Capacitor.isNativePlatform()) await setNativeAppLock(enabled, account?.id);
       persistSecurity({ appLock: enabled });
+      recordSecurityChange("app_lock_changed", "App Lock enabled", "App Lock was enabled for RainX.", { enabled: true });
     } catch (error) {
       alert(error?.message || "Unable to update App Lock.");
     }
