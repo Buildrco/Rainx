@@ -43,7 +43,7 @@ public class RainxBottomSheetPlugin extends Plugin {
 
             FrameLayout content = new FrameLayout(getContext());
             content.setBackgroundColor(Color.TRANSPARENT);
-            int screenHeight = getResources().getDisplayMetrics().heightPixels;
+            int screenHeight = getContext().getResources().getDisplayMetrics().heightPixels;
             content.setMinimumHeight((int) (screenHeight * 0.94f));
             content.addView(sheetWebView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
