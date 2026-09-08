@@ -5609,6 +5609,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   const [pinValue, setPinValue] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [pinError, setPinError] = useState("");
+  const [enableBiometricAfterPin, setEnableBiometricAfterPin] = useState(false);
   const [settingsPrefs, setSettingsPrefs] = useState(() => {
     try { return JSON.parse(lsGet("rainx-settings-prefs") || "{}"); } catch { return {}; }
   });
@@ -5847,6 +5848,15 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         const hash = await hashPin(pinValue);
         persistSecurity({ pinEnabled: true, appLock: true, pinLength: pinValue.length, pinHash: hash });
       }
+      if (enableBiometricAfterPin) {
+        try {
+          await setNativeBiometricEnabled(true, account?.id);
+          persistSecurity({ biometricEnabled: true, appLock: true });
+        } catch (biometricError) {
+          alert(biometricError?.message || "PIN saved. Biometric setup can be completed later.");
+        }
+        setEnableBiometricAfterPin(false);
+      }
       setPinValue(""); setPinConfirm(""); setSecuritySheet(null);
     } catch (error) {
       setPinError(error?.message || "Unable to save PIN on this device.");
@@ -5854,6 +5864,13 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   };
   const setupPasskey = async () => {
     try {
+      const deviceConfig = await getNativeLockConfig(account?.id).catch(() => null);
+      if (!deviceConfig?.pinEnabled) {
+        setEnableBiometricAfterPin(true);
+        setPinValue(""); setPinConfirm(""); setPinError("");
+        setSecuritySheet("pin");
+        return;
+      }
       if (Capacitor.isNativePlatform()) {
         await setNativeBiometricEnabled(true, account?.id);
         persistSecurity({ biometricEnabled: true, appLock: true });
@@ -5899,7 +5916,8 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   };
   const toggleAppLock = async () => {
     const enabled = !(securityPrefs.appLock ?? false);
-    if (enabled && !(securityPrefs.pinEnabled || securityPrefs.biometricEnabled)) {
+    const deviceConfig = enabled ? await getNativeLockConfig(account?.id).catch(() => null) : null;
+    if (enabled && !deviceConfig?.pinEnabled) {
       setSecuritySheet("appLockSetup");
       return;
     }
@@ -7380,11 +7398,11 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             <LightRow icon={FileCheck} title="Moderation & reports" subtitle="Review token reports, takedowns and creator disputes" onPress={()=>alert("Backend required: moderation/report queue.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
           </>}
           {securitySheet === "pin" && <>
-            <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc="Your PIN is hashed before it is stored on this device." />
+             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed before it is stored on this device."} />
             <input value={pinValue} onChange={e=>setPinValue(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="New PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />
             <input value={pinConfirm} onChange={e=>setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Confirm PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
             {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
-            <button onClick={setupPin} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>Save PIN</button>
+             <button onClick={setupPin} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>{enableBiometricAfterPin ? "Save PIN & enable biometrics" : "Save PIN"}</button>
           </>}
           {securitySheet === "sessions" && <>
             <LightSheetTitle title="Active Sessions" desc="Review devices currently signed in to RainX." />
