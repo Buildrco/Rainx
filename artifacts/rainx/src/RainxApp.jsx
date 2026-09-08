@@ -810,6 +810,20 @@ async function recordActivity(userId, action, meta) {
   try { await supabase.from("activity_logs").insert({ user_id: userId, action, meta: meta || null }); } catch {}
 }
 
+async function recordWebLoginEvent(userId) {
+  if (!userId || typeof navigator === "undefined") return;
+  try {
+    await supabase.rpc("record_my_login_event", {
+      p_device_id: `web-${navigator.platform || "browser"}-${navigator.language || "unknown"}`,
+      p_platform: "web",
+      p_device_name: navigator.userAgent?.slice(0, 120) || "Browser",
+      p_model: navigator.platform || null,
+      p_os_version: null,
+      p_app_version: null,
+    });
+  } catch {}
+}
+
 // ---------- Candle-based signal engine ----------
 const TIMEFRAMES = [
   { key: "15m", td: "15min", label: "15 Minute" },
@@ -947,6 +961,7 @@ function AuthScreen({ onAuthed }) {
         return;
       }
       recordActivity(data.user.id, "login", { userAgent: navigator.userAgent, language: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, platform: navigator.platform });
+      recordWebLoginEvent(data.user.id);
       onAuthed(data.session);
     }
     setBusy(false);
@@ -5608,6 +5623,8 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   const [securitySheet, setSecuritySheet] = useState(null);
   const [pinValue, setPinValue] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
+  const [pinCurrent, setPinCurrent] = useState("");
+  const [pinAction, setPinAction] = useState(null);
   const [pinError, setPinError] = useState("");
   const [enableBiometricAfterPin, setEnableBiometricAfterPin] = useState(false);
   const [settingsPrefs, setSettingsPrefs] = useState(() => {
@@ -5748,12 +5765,12 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     if (!account?.id) return;
     setSecuritySessionsLoading(true);
     try {
-      const [{ data: sessionData }, { data: activityData }] = await Promise.all([
+      const [{ data: sessionData, error: sessionError }, { data: loginData, error: loginError }] = await Promise.all([
         supabase.rpc("get_my_auth_sessions"),
-        supabase.from("activity_logs").select("id,action,meta,created_at").eq("user_id", account.id).in("action", ["login","signup"]).order("created_at", { ascending:false }).limit(30),
+        supabase.rpc("get_my_login_history"),
       ]);
-      setSecuritySessions(sessionData || []);
-      setLoginHistoryRows(activityData || []);
+      if (!sessionError) setSecuritySessions(sessionData || []);
+      if (!loginError) setLoginHistoryRows(loginData || []);
     } finally { setSecuritySessionsLoading(false); }
   }, [account?.id]);
 
@@ -5834,6 +5851,55 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
   };
+  const verifyCurrentPin = async () => {
+    if (!/^\d{4,6}$/.test(pinCurrent)) {
+      setPinError("Enter your current PIN.");
+      return false;
+    }
+    const valid = await verifyNativePin(pinCurrent, account?.id);
+    if (!valid) {
+      setPinError("That PIN is incorrect.");
+      return false;
+    }
+    return true;
+  };
+  const changePin = async () => {
+    setPinError("");
+    if (!(await verifyCurrentPin())) return;
+    if (!/^\d{4,6}$/.test(pinValue)) { setPinError("Enter a 4–6 digit new PIN."); return; }
+    if (pinValue !== pinConfirm) { setPinError("PINs do not match."); return; }
+    try {
+      await saveNativePin(pinValue, account?.id);
+      persistSecurity({ pinEnabled: true, appLock: true, pinLength: pinValue.length });
+      setPinValue(""); setPinConfirm(""); setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
+      alert("PIN changed. A security alert was recorded for your account.");
+    } catch (error) {
+      setPinError(error?.message || "Unable to change your PIN.");
+    }
+  };
+  const disablePinLock = async () => {
+    setPinError("");
+    if (!(await verifyCurrentPin())) return;
+    try {
+      await disableNativePin(pinCurrent, account?.id);
+      persistSecurity({ pinEnabled: false, appLock: false, biometricEnabled: false, pinLength: undefined });
+      setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
+      alert("PIN lock disabled. A security alert was recorded for your account.");
+    } catch (error) {
+      setPinError(error?.message || "Unable to disable PIN lock.");
+    }
+  };
+  const confirmAppLockDisable = async () => {
+    setPinError("");
+    if (!(await verifyCurrentPin())) return;
+    try {
+      await setNativeAppLock(false, account?.id);
+      persistSecurity({ appLock: false });
+      setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
+    } catch (error) {
+      setPinError(error?.message || "Unable to disable App Lock.");
+    }
+  };
   const setupPin = async () => {
     setPinError("");
     if (!/^\d{4,6}$/.test(pinValue)) { setPinError("Enter a 4–6 digit PIN."); return; }
@@ -5899,13 +5965,22 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       if (e?.name !== "NotAllowedError") alert(e?.message || "Face ID / passkey setup could not be completed.");
     }
   };
-  const disableBiometric = async () => {
+  const confirmDisableBiometric = async () => {
     try {
+      if (!(await verifyCurrentPin())) return;
       if (Capacitor.isNativePlatform()) await setNativeBiometricEnabled(false, account?.id);
       persistSecurity({ biometricEnabled: false, appLock: securityPrefs.pinEnabled ? securityPrefs.appLock : false });
+      setPinCurrent(""); setPinAction(null); setSecuritySheet(null);
     } catch (error) {
       alert(error?.message || "Unable to disable biometric unlock.");
     }
+  };
+  const disableBiometric = async () => {
+    if (!securityPrefs.pinEnabled) {
+      alert("Set up a PIN before changing biometric unlock.");
+      return;
+    }
+    setPinCurrent(""); setPinError(""); setPinAction("disableBiometric"); setSecuritySheet("biometricConfirm");
   };
   const toggleAppLock = async () => {
     const enabled = !(securityPrefs.appLock ?? false);
@@ -5915,6 +5990,10 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       return;
     }
     try {
+      if (!enabled) {
+        setPinCurrent(""); setPinError(""); setPinAction("disableAppLock"); setSecuritySheet("appLockConfirm");
+        return;
+      }
       if (Capacitor.isNativePlatform()) await setNativeAppLock(enabled, account?.id);
       persistSecurity({ appLock: enabled });
     } catch (error) {
@@ -7279,7 +7358,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         <LightSection title="Device security">
            <LightRow icon={Lock} title="App Lock" subtitle="Require device authentication before opening RainX" onPress={toggleAppLock} right={<LightToggle on={securityPrefs.appLock ?? false} onChange={toggleAppLock} />} />
           <LightDivider />
-          <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "A RainX device PIN is set" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{setPinValue("");setPinConfirm("");setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
+            <LightRow icon={Key} title="PIN Lock" subtitle={securityPrefs.pinEnabled ? "Change or disable your RainX device PIN" : "Create a 4–6 digit RainX device PIN"} onPress={()=>{setPinValue("");setPinConfirm("");setPinCurrent("");setPinAction(null);setPinError("");setSecuritySheet("pin")}} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.pinEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.pinEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.pinEnabled?"ENABLED":"SET UP"}</span>} />
           <LightDivider />
            <LightRow icon={Smartphone} title="Face ID / Device Passkey" subtitle={securityPrefs.biometricEnabled?"Biometric unlock is enabled on this device":"Use Face ID, fingerprint or device biometrics"} onPress={securityPrefs.biometricEnabled ? disableBiometric : setupPasskey} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.biometricEnabled?PREF_YELLOW:PREF_MUTED,border:`1px solid ${securityPrefs.biometricEnabled?PREF_YELLOW:PREF_BORDER}`,borderRadius:20,padding:"4px 9px"}}>{securityPrefs.biometricEnabled?"DISABLE":"SET UP"}</span>} />
         </LightSection>
@@ -7361,14 +7440,14 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             {loginHistoryLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading secure sign-in history…</div> : <>
               {loginHistoryRows.length === 0 && securitySessions.length === 0 && <div style={{padding:"12px 0",fontSize:12,color:PREF_MUTED}}>No recorded sign-in events yet.</div>}
               {loginHistoryRows.map((row) => {
-                const meta = row.meta || {};
+                const device = [row.device_name, row.platform, row.model].filter(Boolean).join(" · ") || "RainX device";
                 return <div key={row.id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}>
-                  <div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Activity}/><div style={{flex:1}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{row.action === "signup" ? "Account created" : "Successful sign-in"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{new Date(row.created_at).toLocaleString()}</div></div><span style={{fontSize:9.5,fontWeight:800,color:"#1A7A50"}}>RECORDED</span></div>
-                  <div style={{fontSize:10.5,color:PREF_MUTED,marginTop:8,lineHeight:1.45}}>{meta.platform || "Device"} · {meta.timezone || "Timezone unavailable"}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Activity}/><div style={{flex:1}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>Successful sign-in</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{new Date(row.created_at).toLocaleString()}</div></div><span style={{fontSize:9.5,fontWeight:800,color:"#1A7A50"}}>RECORDED</span></div>
+                  <div style={{fontSize:10.5,color:PREF_MUTED,marginTop:8,lineHeight:1.55}}>{device}<br />IP: {row.ip_address || "Unavailable"} · Location: {row.location || "Unavailable"}<br />{row.user_agent || "User agent unavailable"}</div>
                 </div>;
               })}
               {securitySessions.length > 0 && <div style={{fontFamily:FONT_HEAD,fontWeight:800,fontSize:12,color:PREF_MUTED,margin:"14px 0 8px"}}>ACTIVE AUTH SESSIONS</div>}
-              {securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}><div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{s.user_agent ? s.user_agent.slice(0,72) : "RainX session"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.created_at ? new Date(s.created_at).toLocaleString() : ""} · {s.ip_address || "IP unavailable"}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div></div>)}
+              {securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"12px 13px",marginBottom:8}}><div style={{display:"flex",alignItems:"center",gap:10}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{s.user_agent ? s.user_agent.slice(0,72) : "RainX session"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.created_at ? new Date(s.created_at).toLocaleString() : ""} · IP: {s.ip_address || "Unavailable"} · Location: {s.location || "Unavailable"}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div></div>)}
             </>}
           </>}
           {securitySheet === "reportSecurity" && <>
@@ -7390,13 +7469,20 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             <LightDivider />
             <LightRow icon={FileCheck} title="Moderation & reports" subtitle="Review token reports, takedowns and creator disputes" onPress={()=>alert("Backend required: moderation/report queue.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
           </>}
-          {securitySheet === "pin" && <>
-             <LightSheetTitle title={securityPrefs.pinEnabled?"Change RainX PIN":"Set up RainX PIN"} desc={enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed before it is stored on this device."} />
-            <input value={pinValue} onChange={e=>setPinValue(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="New PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />
-            <input value={pinConfirm} onChange={e=>setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Confirm PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
-            {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
-             <button onClick={setupPin} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>{enableBiometricAfterPin ? "Save PIN & enable biometrics" : "Save PIN"}</button>
-          </>}
+           {securitySheet === "pin" && <>
+             <LightSheetTitle title={securityPrefs.pinEnabled ? "PIN Lock" : "Set up RainX PIN"} desc={securityPrefs.pinEnabled && !pinAction ? "Choose what you want to do with your account PIN." : enableBiometricAfterPin ? "A device PIN is required before Face ID or fingerprint can be enabled." : "Your PIN is hashed before it is stored securely in Supabase."} />
+             {securityPrefs.pinEnabled && !pinAction ? <>
+               <LightRow icon={Key} title="Change PIN" subtitle="Verify your current PIN, then create a new one" onPress={()=>{setPinAction("change");setPinCurrent("");setPinError("")}} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+               <LightDivider />
+               <LightRow icon={Lock} title="Disable PIN lock" subtitle="Verify your current PIN before removing PIN protection" onPress={()=>{setPinAction("disable");setPinCurrent("");setPinError("")}} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             </> : <>
+               {securityPrefs.pinEnabled && <input value={pinCurrent} onChange={e=>setPinCurrent(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Current PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />}
+               {pinAction !== "disable" && <input value={pinValue} onChange={e=>setPinValue(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder={securityPrefs.pinEnabled ? "New PIN" : "New PIN"} style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:10}} />}
+               {pinAction !== "disable" && <input value={pinConfirm} onChange={e=>setPinConfirm(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Confirm PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />}
+               {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
+               <button onClick={pinAction==="change" ? changePin : pinAction==="disable" ? disablePinLock : setupPin} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>{pinAction==="change" ? "Change PIN" : pinAction==="disable" ? "Disable PIN lock" : enableBiometricAfterPin ? "Save PIN & enable biometrics" : "Save PIN"}</button>
+             </>}
+           </>}
           {securitySheet === "sessions" && <>
             <LightSheetTitle title="Active Sessions" desc="Review devices currently signed in to RainX." />
             {securitySessionsLoading ? <div style={{padding:"18px 0",fontSize:12,color:PREF_MUTED,textAlign:"center"}}>Loading sessions…</div> : securitySessions.length === 0 ? <div style={{padding:"10px 0",fontSize:12,color:PREF_MUTED}}>No active session details are available.</div> : securitySessions.map((s) => <div key={s.session_id} style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:14,padding:"13px 14px",display:"flex",alignItems:"center",gap:12,marginBottom:8}}><LightIcon Icon={Smartphone}/><div style={{flex:1,minWidth:0}}><div style={{fontFamily:FONT_HEAD,fontWeight:700,fontSize:12.5,color:PREF_TEXT}}>{s.user_agent ? s.user_agent.slice(0,72) : "RainX device"}</div><div style={{fontSize:10.5,color:PREF_MUTED,marginTop:2}}>{s.ip_address || "IP unavailable"} · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ""}</div></div><span style={{fontSize:9.5,color:"#1A7A50",fontWeight:800}}>ACTIVE</span></div>)}
@@ -7407,6 +7493,18 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
             <LightDivider />
             <LightRow icon={Smartphone} title="Set up Face ID / device passkey" subtitle="Use your device biometric when supported" onPress={setupPasskey} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           </>}
+           {securitySheet === "appLockConfirm" && <>
+             <LightSheetTitle title="Confirm App Lock change" desc="Enter your current PIN to turn App Lock off. This prevents an accidental or unauthorized change." />
+             <input value={pinCurrent} onChange={e=>setPinCurrent(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Current PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
+             {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
+             <button onClick={confirmAppLockDisable} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>Confirm and turn off</button>
+           </>}
+           {securitySheet === "biometricConfirm" && <>
+             <LightSheetTitle title="Confirm biometric change" desc="Enter your current PIN to disable Face ID, fingerprint or device passkey." />
+             <input value={pinCurrent} onChange={e=>setPinCurrent(e.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" type="password" placeholder="Current PIN" style={{width:"100%",boxSizing:"border-box",background:"#fff",border:`1px solid ${PREF_BORDER}`,borderRadius:12,padding:"12px 13px",color:PREF_TEXT,fontFamily:FONT_HEAD,fontSize:15,outline:"none",marginBottom:6}} />
+             {pinError&&<div style={{fontSize:11,color:T.rust,margin:"5px 0 10px"}}>{pinError}</div>}
+             <button onClick={confirmDisableBiometric} style={{width:"100%",background:PREF_YELLOW,color:T.ink,border:0,borderRadius:12,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",marginTop:8}}>Confirm and disable</button>
+           </>}
           {securitySheet === "accountData" && <>
             <LightSheetTitle title="Account data" desc="Manage the privacy and account-data actions available from this device." />
             <LightRow icon={Download} title="Export local settings" subtitle="Download your RainX preferences as JSON" onPress={()=>{setSecuritySheet(null);setMorePage("settings");setSettingsSheet("downloadData")}} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
