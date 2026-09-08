@@ -5619,6 +5619,10 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   const [loginHistoryRows, setLoginHistoryRows] = useState([]);
   const [loginHistoryLoading, setLoginHistoryLoading] = useState(false);
   const [recoveryCodes, setRecoveryCodes] = useState([]);
+  const [twoFactorFactor, setTwoFactorFactor] = useState(null);
+  const [twoFactorEnrollment, setTwoFactorEnrollment] = useState(null);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [twoFactorLoading, setTwoFactorLoading] = useState(false);
   const [blockedUsers, setBlockedUsers] = useState([]);
   const [mutedUsers, setMutedUsers] = useState([]);
   const [blockedLoading, setBlockedLoading] = useState(false);
@@ -5753,6 +5757,72 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
       setLoginHistoryRows(activityData || []);
     } finally { setSecuritySessionsLoading(false); }
   }, [account?.id]);
+
+  const refreshTwoFactor = useCallback(async () => {
+    if (!account?.id || !supabase.auth.mfa?.listFactors) return;
+    const { data, error } = await supabase.auth.mfa.listFactors();
+    if (error) return;
+    const verified = (data?.totp || []).find(factor => factor.status === "verified");
+    setTwoFactorFactor(verified || null);
+    if (verified) persistSecurity({ twoFactorEnabled: true, twoFactorFactorId: verified.id });
+    else persistSecurity({ twoFactorEnabled: false, twoFactorFactorId: undefined });
+  }, [account?.id]);
+
+  useEffect(() => { refreshTwoFactor(); }, [refreshTwoFactor]);
+
+  const beginTwoFactorEnrollment = async () => {
+    setTwoFactorLoading(true);
+    try {
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: "totp",
+        friendlyName: "RainX Authenticator",
+      });
+      if (error) throw error;
+      setTwoFactorEnrollment(data);
+      setTwoFactorCode("");
+    } catch (error) {
+      alert(error?.message || "Unable to start authenticator setup.");
+    } finally { setTwoFactorLoading(false); }
+  };
+
+  const verifyTwoFactorEnrollment = async () => {
+    if (!twoFactorEnrollment?.id || !/^\d{6}$/.test(twoFactorCode)) {
+      alert("Enter the 6-digit code from your authenticator app.");
+      return;
+    }
+    setTwoFactorLoading(true);
+    try {
+      const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId: twoFactorEnrollment.id });
+      if (challengeError) throw challengeError;
+      const { error } = await supabase.auth.mfa.verify({
+        factorId: twoFactorEnrollment.id,
+        challengeId: challenge.id,
+        code: twoFactorCode,
+      });
+      if (error) throw error;
+      setTwoFactorFactor({ id: twoFactorEnrollment.id, status: "verified", factor_type: "totp" });
+      setTwoFactorEnrollment(null);
+      setTwoFactorCode("");
+      persistSecurity({ twoFactorEnabled: true, twoFactorFactorId: twoFactorEnrollment.id });
+      alert("Two-step authentication is enabled.");
+    } catch (error) {
+      alert(error?.message || "That authenticator code could not be verified.");
+    } finally { setTwoFactorLoading(false); }
+  };
+
+  const disableTwoFactor = async () => {
+    if (!twoFactorFactor?.id) return;
+    setTwoFactorLoading(true);
+    try {
+      const { error } = await supabase.auth.mfa.unenroll({ factorId: twoFactorFactor.id });
+      if (error) throw error;
+      setTwoFactorFactor(null);
+      persistSecurity({ twoFactorEnabled: false, twoFactorFactorId: undefined });
+      alert("Two-step authentication disabled.");
+    } catch (error) {
+      alert(error?.message || "Unable to disable two-step authentication.");
+    } finally { setTwoFactorLoading(false); }
+  };
 
   useEffect(() => {
     if (settingsSheet !== "sessions" && settingsSheet !== "loginHistory") return;
@@ -7188,7 +7258,7 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
         <LightSection title="Sign-in security">
           <LightRow icon={Key} title="Change Password" subtitle="Update your account password" onPress={async()=>{const {error}=await supabase.auth.resetPasswordForEmail(account?.email||""); if(!error) alert("Password reset link sent to your email."); else alert("Could not send reset email. Try again.");}} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           <LightDivider />
-          <LightRow icon={ShieldCheck} title="Two-Step Authentication (2FA)" subtitle={securityPrefs.twoFactorEnabled ? "2FA is enabled for this account" : "Add an authenticator app or verified factor"} onPress={()=>setSecuritySheet("twoFactor")} right={<span style={{fontSize:10.5,fontWeight:800,color:securityPrefs.twoFactorEnabled?"#1A7A50":PREF_MUTED,border:`1px solid ${securityPrefs.twoFactorEnabled?"#B9DCCB":PREF_BORDER}`,borderRadius:20,padding:"4px 8px"}}>{securityPrefs.twoFactorEnabled?"ENABLED":"BACKEND"}</span>} />
+          <LightRow icon={ShieldCheck} title="Two-Step Authentication (2FA)" subtitle={twoFactorFactor ? "Authenticator app is protecting this account" : "Add an authenticator app or verified factor"} onPress={()=>setSecuritySheet("twoFactor")} right={<span style={{fontSize:10.5,fontWeight:800,color:twoFactorFactor?"#1A7A50":PREF_MUTED,border:`1px solid ${twoFactorFactor?"#B9DCCB":PREF_BORDER}`,borderRadius:20,padding:"4px 8px"}}>{twoFactorFactor?"ENABLED":"SET UP"}</span>} />
           <LightDivider />
           <LightRow icon={Smartphone} title="Phone & recovery methods" subtitle="Manage verified phone numbers and recovery factors" onPress={()=>setSecuritySheet("recovery")} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
           <LightDivider />
@@ -7249,11 +7319,22 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
 
         {securitySheet && <LightSheet onClose={()=>setSecuritySheet(null)}>
           {securitySheet === "twoFactor" && <>
-            <LightSheetTitle title="Two-Step Authentication" desc="Backend registration is required before 2FA can protect the account. This screen is ready for the authenticated setup flow." />
-            <div style={{background:"#FFF8E5",border:"1px solid #EAD28A",borderRadius:12,padding:"12px 13px",fontSize:11,color:"#765B00",lineHeight:1.5,marginBottom:12}}>UI is ready; the server must issue and verify the authenticator secret, recovery codes and challenge before enabling the account flag.</div>
-            <LightRow icon={ShieldCheck} title="Authenticator app" subtitle="Register TOTP and verify a one-time code" onPress={()=>alert("Backend required: TOTP enrollment endpoint and verification.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
-            <LightDivider />
-            <LightRow icon={FileText} title="Recovery codes" subtitle="Generate and rotate one-time recovery codes" onPress={()=>alert("Backend required: secure recovery-code generation.")} right={<span style={{fontSize:10,fontWeight:800,color:PREF_MUTED}}>BACKEND</span>} />
+             <LightSheetTitle title="Two-Step Authentication" desc={twoFactorFactor ? "Your authenticator app is verified for this account." : "Use an authenticator app to protect new sign-ins."} />
+             {twoFactorFactor ? <>
+               <div style={{background:"#EEF9F2",border:"1px solid #B9DCCB",borderRadius:12,padding:"12px 13px",fontSize:11,color:"#1A7A50",lineHeight:1.5,marginBottom:12}}>Two-step authentication is active. You will need a current 6-digit authenticator code when RainX requests an MFA challenge.</div>
+               <LightRow icon={ShieldCheck} title="Authenticator app" subtitle="Verified and protecting your account" right={<span style={{fontSize:10,fontWeight:800,color:"#1A7A50"}}>ENABLED</span>} />
+               <LightDivider />
+               <LightRow icon={Trash2} title="Disable two-step authentication" subtitle="Remove the verified authenticator factor" onPress={disableTwoFactor} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             </> : !twoFactorEnrollment ? <>
+               <div style={{background:"#FFF8E5",border:"1px solid #EAD28A",borderRadius:12,padding:"12px 13px",fontSize:11,color:"#765B00",lineHeight:1.5,marginBottom:12}}>RainX will connect this account to Supabase Auth MFA. No secret is stored in the app; your authenticator app keeps the factor.</div>
+               <LightRow icon={ShieldCheck} title="Authenticator app" subtitle="Scan a QR code and verify a 6-digit code" onPress={beginTwoFactorEnrollment} right={<ChevronRight size={18} color={PREF_MUTED}/>} />
+             </> : <>
+               <div style={{fontSize:12,color:PREF_TEXT,lineHeight:1.55,marginBottom:10}}>Scan this QR code with Google Authenticator, Authy or another TOTP app, then enter the current 6-digit code.</div>
+               {twoFactorEnrollment?.totp?.qr_code && <img src={twoFactorEnrollment.totp.qr_code} alt="RainX authenticator QR code" style={{display:"block",width:170,height:170,margin:"6px auto 12px",borderRadius:10,border:`1px solid ${PREF_BORDER}`,background:"#FFFFFF",padding:8}} />}
+               {twoFactorEnrollment?.totp?.secret && <div style={{background:PREF_BG,border:`1px solid ${PREF_BORDER}`,borderRadius:10,padding:"9px 10px",fontSize:10.5,color:PREF_MUTED,wordBreak:"break-all",marginBottom:12}}>Manual setup key: <strong style={{color:PREF_TEXT}}>{twoFactorEnrollment.totp.secret}</strong></div>}
+               <input value={twoFactorCode} onChange={event=>setTwoFactorCode(event.target.value.replace(/\D/g,"").slice(0,6))} inputMode="numeric" autoComplete="one-time-code" placeholder="6-digit code" aria-label="Authenticator code" style={{width:"100%",boxSizing:"border-box",border:`1px solid ${PREF_BORDER}`,borderRadius:11,padding:"12px 13px",fontSize:16,letterSpacing:4,textAlign:"center",outline:"none",marginBottom:10}} />
+               <button disabled={twoFactorLoading || twoFactorCode.length !== 6} onClick={verifyTwoFactorEnrollment} style={{width:"100%",background:PREF_YELLOW,color:"#17191B",border:0,borderRadius:11,padding:"12px 0",fontFamily:FONT_HEAD,fontWeight:800,fontSize:13,cursor:"pointer",opacity:(twoFactorLoading || twoFactorCode.length !== 6) ? .55 : 1}}>{twoFactorLoading?"VERIFYING…":"VERIFY & ENABLE"}</button>
+             </>}
           </>}
           {securitySheet === "recovery" && <>
             <LightSheetTitle title="Recovery methods" desc="Keep at least two trusted ways to regain access." />
