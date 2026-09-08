@@ -2836,8 +2836,9 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
   const _TIER_RANK = { none: 0, weekly: 1, monthly: 2, yearly: 3 };
   const isAccountPro = (_TIER_RANK[entitlement?.tier] || 0) >= 1; // any paid subscriber unlocks chat settings
   const [unreadDmCount, setUnreadDmCount] = useState(0);
-  const [fabVisible, setFabVisible] = useState(true);
-  const fabScrollRef = useRef(0);
+  const fabSlideRef = useRef(0);
+  const [fabSlide, setFabSlide] = useState(0);
+  const loadPostsSeqRef = useRef(0);
   const openChat=useCallback((user=null)=>{
     clearTimeout(chatCloseTimerRef.current);
     if (!chatOpen) pushCommunityOverlay("chat");
@@ -2932,19 +2933,28 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
     onViewingProfileChange?.(viewingUserId);
   }, [viewingUserId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // FAB scroll-hide: hide when scrolling down, show when scrolling up
+  // Keep the FAB physically linked to the app scroll surface. No threshold,
+  // delayed timeout, or window.scrollY: every finger movement moves it, and
+  // when the finger pauses the button pauses too.
   useEffect(() => {
+    const node = document.querySelector(".rx-app-root");
+    if (!node) return;
+    let previousTop = node.scrollTop;
+    let frame = 0;
     const handleScroll = () => {
-      const y = window.scrollY;
-      if (y > fabScrollRef.current + 8) {
-        setFabVisible(false);
-      } else if (y < fabScrollRef.current - 8) {
-        setFabVisible(true);
-      }
-      fabScrollRef.current = y;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const currentTop = node.scrollTop;
+        const delta = currentTop - previousTop;
+        const next = currentTop <= 0 ? 0 : Math.max(0, Math.min(88, fabSlideRef.current + delta));
+        fabSlideRef.current = next;
+        setFabSlide(next);
+        previousTop = currentTop;
+      });
     };
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => window.removeEventListener("scroll", handleScroll);
+    node.addEventListener("scroll", handleScroll, { passive: true });
+    return () => { node.removeEventListener("scroll", handleScroll); if (frame) cancelAnimationFrame(frame); };
   }, []);
 
   // Track IDs we've SUCCESSFULLY resolved (have a name) so we don't refetch them.
@@ -2991,6 +3001,7 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
   }, []);
 
   const loadPosts = useCallback(async () => {
+    const loadSeq = ++loadPostsSeqRef.current;
     setPostsLoading(true);
     const [{ data }, { data: blocked }, { data: muted }, { data: notInterested }] = await Promise.all([
       supabase.from("community_posts").select("*").order("created_at", { ascending: false }).limit(100),
@@ -2998,30 +3009,10 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
       account?.id ? supabase.from("user_mutes").select("muted_id").eq("muter_id", account.id) : { data: [] },
       account?.id ? supabase.from("post_not_interested").select("post_id").eq("user_id", account.id) : { data: [] },
     ]);
+    if (loadSeq !== loadPostsSeqRef.current) return;
     const excludedUsers = new Set([...(blocked || []).map(b => b.blocked_id), ...(muted || []).map(m => m.muted_id)]);
     const excludedPosts = new Set((notInterested || []).map(n => n.post_id));
     let rows = (data || []).filter(p => !excludedUsers.has(p.user_id) && !excludedPosts.has(p.id));
-
-    // Seed engagement from the last known local state before rendering.
-    // Server reconciliation below replaces it without a false unliked flash.
-    const cachedLikeState = readPostLikeCache(account.id);
-    setLikeData((prev) => {
-      const next = {};
-      rows.forEach((post) => {
-        const existing = prev[post.id];
-        next[post.id] = {
-          count: existing?.count ?? (Number(post.likes_count) || 0),
-          likedByMe: existing?.likedByMe ?? cachedLikeState[post.id] === true,
-        };
-      });
-      return next;
-    });
-
-    // The base post query is the primary Community shell. Repost originals,
-    // profile badges, and engagement state are enrichment and must not block
-    // the first real feed render on Android.
-    setPosts(rows);
-    setPostsLoading(false);
 
     // Reposts are real community_posts. Never duplicate the original post into
     // the feed from post_reposts; the wrapper post owns its own engagement.
@@ -3038,30 +3029,6 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
         _originalProfile: originalProfiles[originalById[p.repost_of_post_id]?.user_id] || null,
       } : p);
     }
-    const initialLikeData = {};
-    const initialRepostData = {};
-    rows.forEach((post) => {
-      initialLikeData[post.id] = {
-        count: Number(post.likes_count) || 0,
-        likedByMe: false,
-      };
-      initialRepostData[post.id] = {
-        count: Number(post.reposts_count) || 0,
-        repostedByMe: false,
-      };
-    });
-    setLikeData((prev) => {
-      const next = {};
-      rows.forEach((post) => {
-        const existing = prev[post.id];
-      const pending = pendingPostLikeOps.has(`${account.id}:${post.id}`);
-      next[post.id] = {
-        count: pending && existing ? existing.count : (Number(post.likes_count) || 0),
-        likedByMe: existing?.likedByMe ?? false,
-      };
-      });
-      return next;
-    });
     setRepostData((prev) => {
       const next = {};
       rows.forEach((post) => {
@@ -3077,6 +3044,24 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
     }
 
     const postIds = rows.map((r) => r.id);
+    const { data: hydratedLikes, error: hydratedLikesError } = await supabase
+      .from("post_likes").select("post_id").in("post_id", postIds).eq("user_id", account.id);
+    if (loadSeq !== loadPostsSeqRef.current) return;
+    const myLikedSet = new Set((hydratedLikes || []).map((r) => r.post_id));
+    const hydratedLikeData = {};
+    const cachedLikeState = readPostLikeCache(account.id);
+    postIds.forEach((id) => {
+      const post = rows.find((item) => item.id === id);
+      hydratedLikeData[id] = {
+        count: Number(post?.likes_count) || 0,
+        likedByMe: hydratedLikesError ? cachedLikeState[id] === true : myLikedSet.has(id),
+      };
+    });
+    setLikeData(hydratedLikeData);
+    writePostLikeCache(account.id, hydratedLikeData);
+    setPosts(rows);
+    setPostsLoading(false);
+
     const userIds = [...new Set(rows.flatMap((r) => [r.user_id, r._repostActorId]).filter(Boolean))];
 
     // Compute hashtags synchronously (cheap CPU work, no network)
@@ -3103,15 +3088,10 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
       supabase.rpc("increment_post_views", { post_id: id }).then(() => {}, () => {});
     });
 
-    // Render the primary feed immediately. Profile badges and engagement state
-    // are secondary enrichment and must not delay opening Community on mobile.
-    setPosts(rows);
-    setPostsLoading(false);
-
-    // Load secondary data in parallel — persisted post counts are already available
-    const [pMap, myLikesResult, repostsResult, subResult] = await Promise.all([
+    // Profile badges and repost state are secondary enrichment; reconcile them
+    // without replacing the already-correct feed engagement state.
+    const [pMap, repostsResult, subResult] = await Promise.all([
       fetchProfilesMap(userIds),
-      supabase.from("post_likes").select("post_id").in("post_id", postIds).eq("user_id", account.id),
       supabase.from("post_reposts").select("post_id, user_id").in("post_id", postIds),
       userIds.length
         ? supabase.from("subscriptions").select("user_id, status, expires_at, plan").eq("status", "active").in("user_id", userIds)
@@ -3129,20 +3109,6 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
       pMap[s.user_id].isPro = true;
     });
     setProfilesMap((m) => ({ ...m, ...pMap }));
-
-    // Use the persisted total; only fetch this user's rows to determine likedByMe.
-    const myLikedSet = new Set();
-    (myLikesResult?.data || []).forEach((r) => myLikedSet.add(r.post_id));
-    const ld = {};
-    postIds.forEach((id) => {
-      const post = rows.find((item) => item.id === id);
-      ld[id] = {
-        count: Number(post?.likes_count) || 0,
-        likedByMe: myLikedSet.has(id),
-      };
-    });
-    setLikeData(ld);
-    writePostLikeCache(account.id, ld);
 
     // Repost data — use persisted reposts_count from DB, only scan rows to determine repostedByMe
     const rd = {};
@@ -3326,9 +3292,8 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
       ))}
 
       </div>{/* end feed wrapper */}
-      <button onClick={() => setShowFabModal(true)} style={{ position: "fixed", bottom: 90, right: 20, width: 52, height: 52, borderRadius: "50%", background: T.gold, border: "none", color: T.ink, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 16px rgba(0,0,0,0.4)", cursor: "pointer", opacity: fabVisible ? 1 : 0, transform: fabVisible ? "scale(1)" : "scale(0.8)", transition: "opacity 0.25s, transform 0.25s", pointerEvents: fabVisible ? "auto" : "none" }}
-        onMouseDown={(e) => { if (fabVisible) e.currentTarget.style.transform = "scale(0.9)"; }}
-        onMouseUp={(e) => { if (fabVisible) e.currentTarget.style.transform = "scale(1)"; }}
+      <button onClick={() => setShowFabModal(true)} style={{ position: "fixed", bottom: 90, right: 20, width: 52, height: 52, borderRadius: "50%", background: T.gold, border: "none", color: T.ink, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 6px 16px rgba(0,0,0,0.4)", cursor: "pointer", opacity: Math.max(0, 1 - fabSlide / 88), transform: `translate3d(0, ${fabSlide}px, 0) scale(${1 - fabSlide / 440})`, transition: "none", pointerEvents: fabSlide > 78 ? "none" : "auto" }}
+
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
       </button>

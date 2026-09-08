@@ -1456,7 +1456,7 @@ function NavAssetIcon({ kind, active }) {
     },
     community: {
       outline: "M244.8,150.4a8,8,0,0,1-11.2-1.6A51.6,51.6,0,0,0,192,128a8,8,0,0,1-7.37-4.89,8,8,0,0,1,0-6.22A8,8,0,0,1,192,112a24,24,0,1,0-23.24-30,8,8,0,1,1-15.5-4A40,40,0,1,1,219,117.51a67.94,67.94,0,0,1,27.43,21.68A8,8,0,0,1,244.8,150.4ZM190.92,212a8,8,0,1,1-13.84,8,57,57,0,0,0-98.16,0,8,8,0,1,1-13.84-8,72.06,72.06,0,0,1,33.74-29.92,48,48,0,1,1,58.36,0A72.06,72.06,0,0,1,190.92,212ZM128,176a32,32,0,1,0-32-32A32,32,0,0,0,128,176ZM72,120a8,8,0,0,0-8-8A24,24,0,1,1,87.24,82a8,8,0,1,0,15.5-4A40,40,0,1,0,37,117.51,67.94,67.94,0,0,0,9.6,139.19a8,8,0,1,0,12.8,9.61A51.6,51.6,0,0,1,64,128,8,8,0,0,0,72,120Z",
-      filled: "M64.12,147.8a4,4,0,0,1-4,4.2H16a8,8,0,0,1-7.8-6.17,8.35,8.35,0,0,1,1.62-6.93A67.79,67.79,0,0,1,37,117.51a40,40,0,1,1,66.46-35.8,3.94,3.94,0,0,1-2.27,4.18A64.08,64.08,0,0,0,64,144C64,145.28,64,146.54,64.12,147.8Zm182-8.91A67.76,67.76,0,0,0,219,117.51a40,40,0,1,0-66.46-35.8,3.94,3.94,0,0,0,2.27,4.18A64.08,64.08,0,0,1,192,144c0,1.28,0,2.54-.12,3.8a4,4,0,0,0,4,4.2H240a8,8,0,0,0,7.8-6.17,8.33,8.33,0,0,0-0.63-6.93A67.76,67.76,0,0,0,219,117.51Z"
+      filled: "M64.12,147.8a4,4,0,0,1-4,4.2H16a8,8,0,0,1-7.8-6.17,8.35,8.35,0,0,1,1.62-6.93A67.79,67.79,0,0,1,37,117.51a40,40,0,1,1,66.46-35.8,3.94,3.94,0,0,1-2.27,4.18A64.08,64.08,0,0,0,64,144C64,145.28,64,146.54,64.12,147.8Zm182-8.91A67.76,67.76,0,0,0,219,117.51a40,40,0,1,0-66.46-35.8,3.94,3.94,0,0,0,2.27,4.18A64.08,64.08,0,0,1,192,144c0,1.28,0,2.54-.12,3.8a4,4,0,0,0,4,4.2H240a8,8,0,0,0,7.8-6.17,8.33,8.33,0,0,0-0.63-6.93A67.76,67.76,0,0,0,219,117.51Zm-89,43.18a48,48,0,1,0-58.37,0A72.13,72.13,0,0,0,65.07,212,8,8,0,0,0,72,224H184a8,8,0,0,0,6.93-12A72.15,72.15,0,0,0,157.19,182.07Z"
     }
   };
   const selected = paths[kind] || paths.home;
@@ -1575,7 +1575,8 @@ function MainAppContent({ account, onLogout }) {
   };
 
   const appRootRef = useRef(null);
-  const [navHidden, setNavHidden] = useState(false);
+  const navSlideRef = useRef(0);
+  const [navSlide, setNavSlide] = useState(0);
   const [tab, setTab] = useState(() => {
     const { tab: urlTab } = routeRead();
     if (urlTab && urlTab !== "space-coins") return urlTab === "markets" ? "wallet" : urlTab;
@@ -1608,15 +1609,15 @@ function MainAppContent({ account, onLogout }) {
         frame = 0;
         const currentTop = node.scrollTop;
         const delta = currentTop - previousTop;
-        if (tab !== "home" || currentTop <= 10) setNavHidden(false);
-        else if (delta > 2) setNavHidden(true);
-        else if (delta < -2) setNavHidden(false);
+        const next = currentTop <= 0 ? 0 : Math.max(0, Math.min(92, navSlideRef.current + delta));
+        navSlideRef.current = next;
+        setNavSlide(next);
         previousTop = currentTop;
       });
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => { node.removeEventListener("scroll", handleScroll); if (frame) cancelAnimationFrame(frame); };
-  }, [tab]);
+  }, []);
 
   // ── Telegram-style animated navigation ───────────────────────────────────
   const prevTabRef = useRef("home");
@@ -2962,7 +2963,7 @@ function MainAppContent({ account, onLogout }) {
       </div>}
 
       {!communityProfileOpen && !spaceCoinsScreen && (
-        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", zIndex: 100, background: T.card, opacity: navHidden && tab === "home" ? 0 : 1, transform: navHidden && tab === "home" ? "translate3d(0, calc(100% + 18px), 0)" : "translate3d(0, 0, 0)", pointerEvents: navHidden && tab === "home" ? "none" : "auto", willChange: "transform, opacity", transition: "transform .58s cubic-bezier(.22,1,.36,1), opacity .42s ease", borderTop: `1px solid ${T.cardBorder}`, boxShadow: "0 -8px 24px rgba(0,0,0,0.12)", display: "flex", justifyContent: "space-around", padding: "6px 0 calc(20px + env(safe-area-inset-bottom))", "--rx-logo-bg": isDark ? "#000" : "#fff" }}>
+        <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", zIndex: 100, background: T.card, opacity: Math.max(0, 1 - navSlide / 92), transform: `translate3d(0, ${navSlide}px, 0)`, pointerEvents: navSlide > 80 ? "none" : "auto", willChange: "transform, opacity", transition: "none", borderTop: `1px solid ${T.cardBorder}`, boxShadow: "0 -8px 24px rgba(0,0,0,0.12)", display: "flex", justifyContent: "space-around", padding: "6px 0 calc(20px + env(safe-area-inset-bottom))", "--rx-logo-bg": isDark ? "#000" : "#fff" }}>
           {[
             { key: "home", label: "Home", icon: (active) => (
                <NavAssetIcon kind="home" active={active} />
