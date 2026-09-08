@@ -1662,7 +1662,7 @@ function MainAppContent({ account, onLogout }) {
   const [communityMounted, setCommunityMounted] = useState(true);
   const [spaceCoinsScreen, setSpaceCoinsScreen] = useState(() => {
     const { tab: urlTab, sub } = routeRead();
-    return urlTab === "space-coins" && (sub === "intro" || sub === "dashboard") ? sub : null;
+    return urlTab === "space-coins" ? "dashboard" : null;
   });
   const [scalpingMounted,  setScalpingMounted]  = useState(false);
   useEffect(() => {
@@ -3065,7 +3065,7 @@ function MainAppContent({ account, onLogout }) {
                 <CenterNavLogo
                   key={key}
                   active={active}
-                  onActivate={() => { setProfileFromHeader(false); setSpaceCoinsScreen("intro"); }}
+                  onActivate={() => { setProfileFromHeader(false); setSpaceCoinsScreen("dashboard"); routeWrite("space-coins", "dashboard", null); }}
                 />
               ) : (
                 <button key={key} onClick={() => { if (key === "more") setMorePage(null); setProfileFromHeader(false); goTab(key); }} style={{ position: "relative", background: "none", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 4, color: active ? T.gold : T.muted, cursor: "pointer", minWidth: 52, padding: "4px 2px", transition: "color 0.15s" }}>
@@ -3106,8 +3106,9 @@ function MainAppContent({ account, onLogout }) {
         <SpaceCoinsDashboard
           T={T}
           onBack={() => {
-            setSpaceCoinsScreen("intro");
-            routeWrite("space-coins", "intro", null);
+            setSpaceCoinsScreen(null);
+            setTab("home");
+            routeWrite("home", null, null);
           }}
         />
       )}
