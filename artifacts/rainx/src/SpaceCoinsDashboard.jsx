@@ -676,6 +676,7 @@ function CreateCoin({ onBack, onCreated }) {
           {error && <div style={{ color: "#C0392B", background: "#FFF1F1", border: "1px solid #F3CCCC", borderRadius: 10, padding: "10px 12px", fontSize: 11, marginBottom: 12 }}>{error}</div>}
 
           {step === 5 && (
+            <div className="rx-launched">
               <Check size={30} />
               <h2>Your Space Coin is launched!</h2>
               <p>The launch flow is complete.</p>
