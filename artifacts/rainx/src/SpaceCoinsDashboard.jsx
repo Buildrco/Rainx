@@ -314,7 +314,7 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
   );
 }
 
-function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, onSelectCoin }) {
+function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, coinActivity, onSelectCoin }) {
   const [swipeProgress, setSwipeProgress] = useState(0);
   const [swiping, setSwiping] = useState(false);
 
@@ -1331,6 +1331,25 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     } catch (error) { setNotice(error?.message || "Unable to close order."); }
   };
 
+  // Internal live-market heartbeat: the server is the source of truth for price ticks.
+  // It is intentionally scoped to the active coin screen so we do not create a background
+  // feed for coins nobody is viewing. The database function rate-limits concurrent clients.
+  useEffect(() => {
+    if (!market?.id) return undefined;
+    let active = true;
+    const tick = async () => {
+      if (!active) return;
+      const { data, error } = await supabase.rpc("generate_space_coin_tick", { p_coin_id: market.id });
+      if (!error && data?.price) {
+        const price = Number(data.price);
+        if (Number.isFinite(price) && price > 0) setLivePrice(price);
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, [market?.id]);
+
   useEffect(() => {
     if (!market?.id) return;
     const channel = supabase.channel(`space-coin-trades-${market.id}-${Date.now()}`)
@@ -1950,6 +1969,12 @@ const createStyles = `
   .rx-side-right{right:calc(50% - 106px)}
   .rx-side-art{right:calc(50% - 106px);top:99px;width:82px;height:82px}
 }
+/* Final scoped Space Coin fixes: native picker, flexible sheets, standard history sizing. */
+.rx-upload{position:relative;cursor:pointer;touch-action:manipulation}
+.rx-upload input{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;opacity:0!important;z-index:10!important;display:block!important;cursor:pointer!important}
+.rx-detail-history-row strong{font-size:13px}.rx-detail-history-row small{font-size:10px}.rx-detail-history-row>b{font-size:12px}
+.rx-order-sheet,.rx-order-detail-sheet,.rx-trade-sheet{touch-action:none}
+
 `;
 
 export default function SpaceCoinsDashboard({ onBack }) {
@@ -2057,6 +2082,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
         onMyCoins={() => setOverlay("coins")}
         onConnect={() => setOverlay("wallet")}
         coins={coins}
+        coinActivity={coinActivity}
         onSelectCoin={(coin) => { setSelectedCoin(coin); setScreen("creator"); }}
       />
 
@@ -2071,9 +2097,3 @@ export default function SpaceCoinsDashboard({ onBack }) {
     </>
   );
 }
-
-/* Final scoped Space Coin fixes: native picker, flexible sheets, standard history sizing. */
-.rx-upload{position:relative;cursor:pointer;touch-action:manipulation}
-.rx-upload input{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;opacity:0!important;z-index:10!important;display:block!important;cursor:pointer!important}
-.rx-detail-history-row strong{font-size:13px}.rx-detail-history-row small{font-size:10px}.rx-detail-history-row>b{font-size:12px}
-.rx-order-sheet,.rx-order-detail-sheet,.rx-trade-sheet{touch-action:none}
