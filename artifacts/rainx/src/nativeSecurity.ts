@@ -194,7 +194,9 @@ export async function verifyNativePin(pin: string, accountId?: string): Promise<
   if (!resolved) return false;
   try {
     const { data, error } = await supabase.rpc("verify_my_pin", { p_pin: pin });
-    return !error && data?.success === true;
+    if (error) return false;
+    if (data?.locked_until) throw new Error("Too many incorrect PIN attempts. Try again later.");
+    return data?.success === true;
   } catch { return false; }
 }
 
