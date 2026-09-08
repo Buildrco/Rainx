@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "./supabaseClient";
 import { registerNativeBackHandler } from "./nativeBackStack";
 import {
   ArrowLeft,
@@ -164,7 +165,7 @@ function Shortcuts({ onMyCoins }) {
   );
 }
 
-function CoinList() {
+function CoinList({ coins = COINS, onSelect }) {
   return (
     <section className="rx-space-section">
       <div className="rx-section-head">
@@ -173,9 +174,9 @@ function CoinList() {
       </div>
 
       <div className="rx-coin-list">
-        {COINS.map((coin) => (
-          <button className="rx-coin-row" key={coin.ticker}>
-            <img src={coin.image} alt="" />
+        {coins.map((coin) => (
+          <button className="rx-coin-row" key={coin.id || coin.ticker} onClick={() => onSelect?.(coin)}>
+            <img src={coin.image_url || coin.image} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
             <span className="rx-coin-name">
               <strong>{coin.name}</strong>
               <small>{coin.ticker}</small>
@@ -304,7 +305,7 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
       >
         <div className="rx-swipe-panel">
           <Shortcuts onMyCoins={onMyCoins} />
-          <CoinList />
+          <CoinList coins={coins} onSelect={onSelectCoin} />
           <Trending />
         </div>
 
@@ -316,7 +317,7 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
   );
 }
 
-function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect }) {
+function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, onSelectCoin }) {
   const [swipeProgress, setSwipeProgress] = useState(0);
   const [swiping, setSwiping] = useState(false);
 
@@ -384,8 +385,10 @@ function useEdgeBack(onBack) {
   };
 }
 
-function CreateCoin({ onBack }) {
+function CreateCoin({ onBack, onCreated }) {
   const [step, setStep] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
   const [logo, setLogo] = useState(null);
   const [networkOpen, setNetworkOpen] = useState(false);
 
@@ -416,6 +419,31 @@ function CreateCoin({ onBack }) {
 
   const set = (key, value) => {
     setForm((old) => ({ ...old, [key]: value }));
+  };
+
+  const launchCoin = async () => {
+    if (!valid || saving) return;
+    setSaving(true); setError("");
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user?.id) throw new Error("Sign in to launch a coin.");
+      let image_url = null;
+      if (logo) {
+        const ext = (logo.name.split(".").pop() || "jpg").toLowerCase();
+        const objectPath = `${user.id}/${crypto.randomUUID()}.${ext}`;
+        const upload = await supabase.storage.from("space-coin-logos").upload(objectPath, logo, { contentType: logo.type || "image/jpeg", upsert: false });
+        if (upload.error) throw upload.error;
+        image_url = supabase.storage.from("space-coin-logos").getPublicUrl(objectPath).data.publicUrl;
+      }
+      const supply = Number(String(form.supply).replace(/,/g, ""));
+      const { data, error: insertError } = await supabase.from("space_coins").insert({ creator_id: user.id, name: form.name.trim(), symbol: form.symbol.trim().toUpperCase(), description: form.description.trim(), network: form.network, total_supply: supply > 0 ? supply : 1000000000, initial_price: 0.000001, current_price: 0.000001, image_url, status: "live" }).select("*").single();
+      if (insertError) throw insertError;
+      await supabase.from("space_coin_ticks").insert({ coin_id: data.id, price: data.current_price, open: data.current_price, high: data.current_price, low: data.current_price, close: data.current_price });
+      onCreated?.(data);
+      setStep(5);
+    } catch (err) {
+      setError(err?.message || "Unable to launch coin.");
+    } finally { setSaving(false); }
   };
 
   return (
@@ -639,17 +667,15 @@ function CreateCoin({ onBack }) {
                 <span>Next Step</span>
               </button>
             ) : (
-              <button
-                className="primary"
-                onClick={() => setStep(5)}
-              >
-                Launch Coin <Rocket size={16} />
+              <button className="primary" disabled={saving} onClick={launchCoin}>
+                {saving ? "Launching…" : "Launch Coin"} <Rocket size={16} />
               </button>
             )}
           </div>
 
+          {error && <div style={{ color: "#C0392B", background: "#FFF1F1", border: "1px solid #F3CCCC", borderRadius: 10, padding: "10px 12px", fontSize: 11, marginBottom: 12 }}>{error}</div>}
+
           {step === 5 && (
-            <div className="rx-launched">
               <Check size={30} />
               <h2>Your Space Coin is launched!</h2>
               <p>The launch flow is complete.</p>
@@ -752,12 +778,8 @@ function WalletSheet({ onClose }) {
   );
 }
 
-function MyCoinsSheet({ onClose }) {
-  const rows = [
-    ["STAR DOGE", "SDOGE", "$0.00241", "+18.27%", "$2.41M", "2,845"],
-    ["COSMO CAT", "CCAT", "$0.00102", "+11.09%", "$1.02M", "1,256"],
-    ["MOON PEPE", "MPEPE", "$0.00081", "-3.21%", "$810K", "985"],
-  ];
+function MyCoinsSheet({ onClose, coins = [] }) {
+  const rows = coins.map((coin) => [coin.name, coin.symbol, `${Number(coin.current_price || 0).toFixed(6)}`, `${Number(coin.price_change_24h || 0) >= 0 ? "+" : ""}${Number(coin.price_change_24h || 0).toFixed(2)}%`, `${Number(coin.market_cap || 0).toLocaleString()}`, Number(coin.holder_count || 0).toLocaleString()]);
 
   return (
     <div className="rx-overlay" onClick={onClose}>
@@ -1435,6 +1457,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
     try { return sessionStorage.getItem("rainx-space-screen") || "dashboard"; } catch { return "dashboard"; }
   });
   const [overlay, setOverlay] = useState(null);
+  const [coins, setCoins] = useState(COINS);
 
   const handleNativeBack = useCallback(() => {
     if (overlay) {
@@ -1463,11 +1486,22 @@ export default function SpaceCoinsDashboard({ onBack }) {
   useEffect(() => registerNativeBackHandler(handleNativeBack, "space-coins"), [handleNativeBack]);
 
   useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const { data } = await supabase.from("space_coins").select("*").eq("status", "live").order("created_at", { ascending: false });
+      if (active && data?.length) setCoins(data);
+    };
+    load();
+    const channel = supabase.channel("space-coins-registry").on("postgres_changes", { event: "*", schema: "public", table: "space_coins" }, load).subscribe();
+    return () => { active = false; supabase.removeChannel(channel); };
+  }, []);
+
+  useEffect(() => {
     try { sessionStorage.setItem("rainx-space-screen", screen); } catch {}
   }, [screen]);
 
   if (screen === "create") {
-    return <CreateCoin onBack={() => setScreen("dashboard")} />;
+    return <CreateCoin onBack={() => setScreen("dashboard")} onCreated={(coin) => { setCoins((current) => [coin, ...current.filter((item) => item.id !== coin.id)]); setScreen("dashboard"); }} />;
   }
   if (screen === "menu") {
     return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("creator")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
@@ -1507,6 +1541,8 @@ export default function SpaceCoinsDashboard({ onBack }) {
         onMenu={() => setScreen("menu")}
         onMyCoins={() => setOverlay("coins")}
         onConnect={() => setOverlay("wallet")}
+        coins={coins}
+        onSelectCoin={(coin) => setScreen("creator")}
       />
 
       {overlay === "wallet" && (
@@ -1514,7 +1550,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
       )}
 
       {overlay === "coins" && (
-        <MyCoinsSheet onClose={() => setOverlay(null)} />
+        <MyCoinsSheet coins={coins} onClose={() => setOverlay(null)} />
       )}
 
     </>
