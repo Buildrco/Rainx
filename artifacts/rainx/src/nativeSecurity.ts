@@ -41,20 +41,6 @@ function emitConfigChanged() {
   try { window.dispatchEvent(new Event(CONFIG_EVENT)); } catch {}
 }
 
-function getBrowserSecurityPrefs(): Record<string, any> {
-  if (typeof localStorage === "undefined") return {};
-  try {
-    const value = localStorage.getItem("rainx-security-prefs");
-    return value ? JSON.parse(value) : {};
-  } catch { return {}; }
-}
-
-function saveBrowserSecurityPrefs(patch: Record<string, unknown>) {
-  if (typeof localStorage === "undefined") return;
-  const next = { ...getBrowserSecurityPrefs(), ...patch };
-  try { localStorage.setItem("rainx-security-prefs", JSON.stringify(next)); } catch {}
-}
-
 export function hasNativeUnlockedSession(accountId?: string) {
   if (!accountId || typeof sessionStorage === "undefined") return false;
   try { return sessionStorage.getItem(SESSION_UNLOCK_KEY) === accountId; } catch { return false; }
@@ -197,7 +183,10 @@ export async function verifyNativePin(pin: string, accountId?: string): Promise<
     if (error) return false;
     if (data?.locked_until) throw new Error("Too many incorrect PIN attempts. Try again later.");
     return data?.success === true;
-  } catch { return false; }
+  } catch (error) {
+    if (error?.message === "Too many incorrect PIN attempts. Try again later.") throw error;
+    return false;
+  }
 }
 
 export async function disableNativePin(first: string, second?: string) {
@@ -220,17 +209,17 @@ export async function disableNativePin(first: string, second?: string) {
 }
 
 export async function setNativeAppLock(enabled: boolean, accountId?: string) {
+  const resolved = await resolveAccountId(accountId);
+  if (!resolved) throw new Error("Your account session is not ready.");
   if (!native()) {
-    const prefs = getBrowserSecurityPrefs();
-    if (enabled && !prefs.pinEnabled) {
+    const config = await getNativeLockConfig(resolved);
+    if (enabled && !config.pinEnabled) {
       throw new Error("Set up a PIN before enabling App Lock.");
     }
-    saveBrowserSecurityPrefs({ appLock: enabled });
     if (!enabled) clearNativeSessionUnlock();
     emitConfigChanged();
     return;
   }
-  const resolved = await resolveAccountId(accountId);
   if (!resolved) throw new Error("Your account session is not ready.");
 
   const config = await getNativeLockConfig(resolved);
