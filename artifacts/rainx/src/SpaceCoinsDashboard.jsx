@@ -232,7 +232,7 @@ function ExternalPanel({ onConnect }) {
   );
 }
 
-function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange, coins, onSelectCoin }) {
+function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange, coins, coinActivity = {}, onSelectCoin }) {
   const viewportRef = useRef(null);
   const start = useRef(null);
   const dragProgressRef = useRef(0);
@@ -302,8 +302,8 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
       >
         <div className="rx-swipe-panel">
           <Shortcuts onMyCoins={onMyCoins} />
-          <CoinList coins={coins} onSelect={onSelectCoin} />
-          <Trending coins={coins} />
+          <CoinList coins={[...coins].sort((a,b) => { const A=coinActivity[a.id]||{}; const B=coinActivity[b.id]||{}; return (Number(B.trades||0)-Number(A.trades||0)) || (Number(B.realizedPnl||0)-Number(A.realizedPnl||0)); })} onSelect={onSelectCoin} />
+          <Trending coins={[...coins].sort((a,b) => { const A=coinActivity[a.id]||{}; const B=coinActivity[b.id]||{}; return (Number(B.trades||0)-Number(A.trades||0)) || (Number(B.realizedPnl||0)-Number(A.realizedPnl||0)); })} />
         </div>
 
         <div className="rx-swipe-panel rx-external-slide">
@@ -332,6 +332,7 @@ function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coin
             mode={mode}
             setMode={setMode}
             coins={coins}
+            coinActivity={coinActivity}
             onSelectCoin={onSelectCoin}
             onMyCoins={onMyCoins}
             onConnect={onConnect}
@@ -573,17 +574,12 @@ function CreateCoin({ onBack, onCreated }) {
 
           {step === 1 && (
             <>
-              <label className="rx-upload" onClick={(event) => {
-                if (event.target !== logoInputRef.current) {
-                  event.preventDefault();
-                  logoInputRef.current?.click();
-                }
-              }}>
+              <div className="rx-upload" role="button" tabIndex={0} onClick={() => logoInputRef.current?.click()} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); logoInputRef.current?.click(); } }}>
                 <input
                   ref={logoInputRef}
-                  onClick={(event) => event.stopPropagation()}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp"
+                  accept="image/*"
+                  capture={false}
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     if (file && file.size > 5 * 1024 * 1024) {
@@ -606,7 +602,7 @@ function CreateCoin({ onBack, onCreated }) {
 
                 <strong>Upload Coin Logo</strong>
                 <small>PNG or JPG · Max 5MB</small>
-              </label>
+              </div>
 
               <div className="rx-fields">
                 <Field
@@ -1101,29 +1097,42 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
 function useSheetDrag(open, onClose, initial = 0.48) {
   const [progress, setProgress] = useState(initial);
   const start = useRef(null);
+  const [dragging, setDragging] = useState(false);
   const onPointerDown = (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
     start.current = { y: e.clientY, progress };
+    setDragging(true);
   };
   const onPointerMove = (e) => {
     if (!start.current) return;
-    const height = window.innerHeight || 800;
-    const next = Math.max(0.08, Math.min(0.9, start.current.progress - (e.clientY - start.current.y) / height));
+    const height = Math.max(1, window.innerHeight || 800);
+    const delta = start.current.y - e.clientY;
+    const next = Math.max(0.08, Math.min(0.94, start.current.progress + delta / height));
     setProgress(next);
     if (e.cancelable) e.preventDefault();
   };
   const finish = (e) => {
     if (!start.current) return;
     const delta = e.clientY - start.current.y;
-    if (Math.abs(delta) > 70) {
-      if (delta > 70 && start.current.progress < 0.2) onClose?.();
-      else setProgress(delta > 0 ? 0.42 : 0.86);
-    }
+    const current = progress;
     start.current = null;
+    setDragging(false);
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    if (Math.abs(delta) > 55) {
+      if (delta > 55 && current < 0.24) onClose?.();
+      else if (delta < -55) setProgress(0.90);
+      else setProgress(0.46);
+    } else if (current > 0.70) {
+      setProgress(0.90);
+    } else if (current < 0.30) {
+      setProgress(0.14);
+    } else {
+      setProgress(initial);
+    }
   };
-  useEffect(() => { if (open) setProgress(initial); }, [open, initial]);
-  return { progress, bind: { onPointerDown, onPointerMove, onPointerUp: finish, onPointerCancel: finish } };
+  useEffect(() => { if (open) { setProgress(initial); setDragging(false); start.current = null; } }, [open, initial]);
+  return { progress, dragging, bind: { onPointerDown, onPointerMove, onPointerUp: finish, onPointerCancel: finish } };
 }
 
 function formatMoney(value, currency = "$") {
@@ -1154,7 +1163,7 @@ function OrderSheet({ market, orders, pending, closed, livePrice, onClose, onSel
   const sheet = useSheetDrag(true, onClose, 0.5);
   const rows = active === "open" ? orders : active === "pending" ? pending : closed;
   return <div className="rx-order-backdrop" onClick={onClose}>
-    <section className="rx-order-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
+    <section className="rx-order-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
       <div className="rx-sheet-drag-handle" />
       <OrderTabs active={active} setActive={setActive} />
       <div className="rx-order-list">
@@ -1185,7 +1194,7 @@ function OrderDetailSheet({ market, order, livePrice, onClose, onModify, onClose
   const pnl = order.side === "buy" ? (price - Number(order.price)) * Number(order.quantity) : (Number(order.price) - price) * Number(order.quantity);
   const sideClass = order.side === "buy" ? "buy" : "sell";
   return <div className="rx-order-backdrop" onClick={onClose}>
-    <section className="rx-order-detail-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
+    <section className="rx-order-detail-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
       <div className="rx-sheet-drag-handle" />
       <div className="rx-order-detail-head"><strong>#{String(order.id).slice(0, 10)}</strong><button onClick={onClose}><X size={21} /></button></div>
       <div className="rx-order-detail-summary"><div><strong>{market?.name || "Space Coin"}</strong><small>{order.side === "buy" ? "Buy" : "Sell"} · {Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lots</small></div><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div>
@@ -1288,7 +1297,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const price = Number(result?.price || livePrice);
       const notional = Number(result?.notional || quantity * price);
       const { data: latestAccount } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).single();
-      const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).order("created_at", { ascending: false }).limit(100);
+      const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(100);
       setAccount(latestAccount || account);
       setLivePrice(price);
       setTrades(latestTrades || trades);
@@ -1321,6 +1330,14 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       setNotice(`Order closed. ${pnl >= 0 ? "Profit" : "Loss"}: ${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}. Balance updated.`);
     } catch (error) { setNotice(error?.message || "Unable to close order."); }
   };
+
+  useEffect(() => {
+    if (!market?.id) return;
+    const channel = supabase.channel(`space-coin-trades-${market.id}-${Date.now()}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "space_coin_trades", filter: `coin_id=eq.${market.id}` }, () => loadTrades())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [market?.id, loadTrades]);
 
   useEffect(() => {
     if (!livePrice || !openOrders.length) return;
@@ -1363,13 +1380,13 @@ function CreatorDashboard({ onBack, onManage, coin }) {
         
       </>}
       {activeTab === "Statistics" && <section className="rx-detail-stat-card"><div><span>Market Cap</span><strong>${Number(market.market_cap || Number(market.total_supply || 0) * livePrice).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Liquidity</span><strong>${Number(market.liquidity || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>24h Volume</span><strong>${Number(market.volume_24h || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Holders</span><strong>{Number(market.holder_count || 0).toLocaleString()}</strong></div><div><span>Total Supply</span><strong>{Number(market.total_supply || 0).toLocaleString()}</strong></div><div><span>Network</span><strong>{market.network || "Solana"}</strong></div></section>}
-      {activeTab === "History data" && <section className="rx-detail-history-card">{trades.length ? trades.map((trade) => <button key={trade.id} className="rx-detail-history-row" onClick={() => setSelectedOrder(trade)}><span className={trade.side === "buy" ? "buy" : "sell"}>{trade.side === "buy" ? "Buy" : "Sell"}</span><div><strong>{Number(trade.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</strong><small>{new Date(trade.created_at).toLocaleString()}</small></div><b className={(trade.status || "open") === "closed" ? (Number(trade.close_price) - Number(trade.price)) * (trade.side === "buy" ? 1 : -1) >= 0 ? "profit" : "loss" : "profit"}>{trade.status === "closed" ? formatMoney((Number(trade.close_price) - Number(trade.price)) * Number(trade.quantity) * (trade.side === "buy" ? 1 : -1)) : formatMoney(selectedPnl(trade))}</b></button>) : <div className="rx-detail-empty-history">No trades yet. Your real trades will appear here.</div>}</section>}
+      {activeTab === "History data" && <section className="rx-detail-history-card">{closedOrders.length ? closedOrders.map((trade) => <button key={trade.id} className="rx-detail-history-row" onClick={() => setSelectedOrder(trade)}><span className={trade.side === "buy" ? "buy" : "sell"}>{trade.side === "buy" ? "Buy" : "Sell"}</span><div><strong>{Number(trade.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</strong><small>{new Date(trade.closed_at || trade.created_at).toLocaleString()}</small></div><b className={((Number(trade.close_price) - Number(trade.price)) * (trade.side === "buy" ? 1 : -1)) >= 0 ? "profit" : "loss"}>{formatMoney((Number(trade.close_price) - Number(trade.price)) * Number(trade.quantity) * (trade.side === "buy" ? 1 : -1))}</b></button>) : <div className="rx-detail-empty-history">No closed trades yet. Your completed real trades will appear here.</div>}</section>}
       {notice && <div className="rx-detail-notice">{notice}</div>}
     </div>
 
     <div className="rx-detail-actions"><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button><button className="rx-detail-bell" onClick={() => setOrdersSheet(true)} aria-label="Orders"><Bell size={23} /></button></div>
 
-    {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)` }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Order size</span><strong>{fmt(Number(amount))} lots · {formatMoney(Number(amount) * Number(livePrice))}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
+    {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)`, transition: tradeSheetDrag.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Order size</span><strong>{fmt(Number(amount))} lots · {formatMoney(Number(amount) * Number(livePrice))}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
     {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
     {selectedOrder && <OrderDetailSheet market={market} order={selectedOrder} livePrice={livePrice} onClose={() => setSelectedOrder(null)} onModify={modifyOrder} onCloseOrder={closeOrder} />}
   </main>;
@@ -1397,7 +1414,7 @@ const detailStyles = `
 .rx-detail-chart-wrap{height:255px;position:relative;margin:0 -2px}.rx-chart-mode{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:5px 0 9px}.rx-chart-mode button{height:34px;border:1px solid #e5e7eb;border-radius:17px;background:#fff;color:#8a8f96;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-chart-mode button.active{background:#111418;color:#fff;border-color:#111418}
 .rx-position-card{position:absolute;right:9px;top:10px;z-index:4;min-width:126px;border:0;border-radius:12px;padding:8px 10px;display:grid;grid-template-columns:auto 1fr;column-gap:7px;text-align:left;box-shadow:0 5px 18px rgba(17,20,24,.13);cursor:pointer}.rx-position-card span{font-size:9px;font-weight:800}.rx-position-card strong{font-size:9px}.rx-position-card b{grid-column:1/-1;margin-top:4px;font-size:13px}.rx-position-card.profit{background:#4bc98a;color:#fff}.rx-position-card.loss{background:#ef4b4b;color:#fff}
 .rx-detail-wallet{border:0;background:transparent;color:#111418;padding:0;cursor:pointer;text-align:left;position:relative}.rx-detail-wallet em{font-style:normal;position:absolute;right:-10px;top:-8px;min-width:16px;height:16px;border-radius:8px;padding:0 4px;background:#d7a21a;color:#fff;font-size:8px;display:grid;place-items:center}
-.rx-order-backdrop,.rx-trade-sheet-backdrop{touch-action:none}.rx-order-backdrop{position:absolute;inset:0;z-index:45;background:rgba(17,20,24,.38);display:flex;align-items:flex-end}.rx-order-sheet,.rx-order-detail-sheet{width:100%;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.2);will-change:transform;touch-action:none;overflow:hidden}.rx-order-sheet{height:72dvh}.rx-order-detail-sheet{height:82dvh;padding-bottom:calc(14px + env(safe-area-inset-bottom));overflow:auto;touch-action:none}.rx-sheet-drag-handle{width:42px;height:4px;border-radius:9px;background:#d8dadd;margin:10px auto 13px}.rx-order-tabs{height:55px;display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #e7e8ea}.rx-order-tabs button{border:0;border-bottom:3px solid transparent;background:#fff;color:#858a90;font:500 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-list{height:calc(100% - 69px);overflow:auto;-webkit-overflow-scrolling:touch}.rx-order-row{width:100%;min-height:76px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:48px 1fr auto;gap:9px;align-items:center;text-align:left;padding:10px 18px;cursor:pointer}.rx-order-side{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:10px;font-weight:800}.rx-order-side.buy{background:#eaf8f1;color:#39a878}.rx-order-side.sell{background:#fdeceb;color:#d94c4c}.rx-order-row strong,.rx-order-row small{display:block}.rx-order-row strong{font-size:13px}.rx-order-row small{margin-top:4px;color:#858a90;font-size:9px}.rx-order-row b{font-size:11px;text-align:right}.profit{color:#39ad7a!important}.loss{color:#d94c4c!important}.rx-order-empty{min-height:52vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:25px;color:#747a80}.rx-order-empty strong{font-size:17px;color:#111418}.rx-order-empty span{margin-top:8px;max-width:260px;font-size:11px;line-height:1.45}.rx-order-detail-head{height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 18px}.rx-order-detail-head strong{font-size:16px}.rx-order-detail-head button{border:0;background:transparent;color:#111418}.rx-order-detail-summary{display:flex;justify-content:space-between;align-items:center;padding:12px 18px 15px}.rx-order-detail-summary strong,.rx-order-detail-summary small{display:block}.rx-order-detail-summary strong{font-size:16px}.rx-order-detail-summary small{margin-top:5px;color:#7f858b;font-size:10px}.rx-order-detail-summary>b{font-size:15px}.rx-order-detail-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid #e6e8ea;margin:0 18px}.rx-order-detail-tabs button{height:44px;border:0;background:#fff;color:#858a90;border-bottom:3px solid transparent;font:500 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-detail-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #edf0f2;margin:0 18px}.rx-order-detail-grid>div{padding:14px 0;border-bottom:1px solid #edf0f2}.rx-order-detail-grid>div:nth-child(odd){border-right:1px solid #edf0f2;padding-right:12px}.rx-order-detail-grid>div:nth-child(even){padding-left:12px}.rx-order-detail-grid small,.rx-order-detail-grid strong{display:block}.rx-order-detail-grid small{font-size:9px;color:#858a90}.rx-order-detail-grid strong{margin-top:5px;font-size:12px}.rx-order-setting{height:52px;margin:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f2;font-size:13px}.rx-switch{width:45px;height:26px;border:0;border-radius:14px;background:#d2d5d8;padding:3px;display:flex;align-items:center;justify-content:flex-start}.rx-switch i{display:block;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.16)}.rx-switch.on{background:#d7a21a;justify-content:flex-end}.rx-order-input{display:block;width:calc(100% - 36px);height:42px;margin:8px 18px;border:1px solid #e0e3e6;border-radius:11px;padding:0 11px;outline:0;font:600 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save,.rx-order-close{width:calc(100% - 36px);height:47px;margin:10px 18px 0;border:0;border-radius:13px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save{background:#f4d35e;color:#111418}.rx-order-close{background:#f2f3f5;color:#111418}.rx-close-confirm{position:absolute;left:12px;right:12px;bottom:12px;z-index:4;background:#fff;border-radius:22px;padding:20px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 8px 35px rgba(17,20,24,.2);border:1px solid #eceeef}.rx-close-confirm h3{margin:0 0 16px;font-size:19px}.rx-close-confirm>div{display:flex;justify-content:space-between;padding:8px 0;color:#737980;font-size:12px}.rx-close-confirm>div b{color:#111418}.rx-close-confirm button{width:100%;height:46px;border:0;border-radius:12px;margin-top:8px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-confirm button:first-of-type{background:#f4d35e;color:#111418}.rx-close-confirm button:last-of-type{background:#f1f2f4;color:#111418}
+.rx-order-backdrop,.rx-trade-sheet-backdrop{touch-action:none;pointer-events:auto}.rx-order-backdrop{position:absolute;inset:0;z-index:45;background:rgba(17,20,24,.38);display:flex;align-items:flex-end}.rx-order-sheet,.rx-order-detail-sheet{width:100%;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.2);will-change:transform;touch-action:none;overflow:hidden;user-select:none;-webkit-user-select:none}.rx-order-sheet{height:72dvh}.rx-order-detail-sheet{height:82dvh;padding-bottom:calc(14px + env(safe-area-inset-bottom));overflow-y:auto;overflow-x:hidden;touch-action:none}.rx-sheet-drag-handle{width:42px;height:4px;border-radius:9px;background:#d8dadd;margin:10px auto 13px}.rx-order-tabs{height:55px;display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #e7e8ea}.rx-order-tabs button{border:0;border-bottom:3px solid transparent;background:#fff;color:#858a90;font:500 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-list{height:calc(100% - 69px);overflow:auto;-webkit-overflow-scrolling:touch}.rx-order-row{width:100%;min-height:76px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:48px 1fr auto;gap:9px;align-items:center;text-align:left;padding:10px 18px;cursor:pointer}.rx-order-side{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:10px;font-weight:800}.rx-order-side.buy{background:#eaf8f1;color:#39a878}.rx-order-side.sell{background:#fdeceb;color:#d94c4c}.rx-order-row strong,.rx-order-row small{display:block}.rx-order-row strong{font-size:13px}.rx-order-row small{margin-top:4px;color:#858a90;font-size:9px}.rx-order-row b{font-size:11px;text-align:right}.profit{color:#39ad7a!important}.loss{color:#d94c4c!important}.rx-order-empty{min-height:52vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:25px;color:#747a80}.rx-order-empty strong{font-size:17px;color:#111418}.rx-order-empty span{margin-top:8px;max-width:260px;font-size:11px;line-height:1.45}.rx-order-detail-head{height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 18px}.rx-order-detail-head strong{font-size:16px}.rx-order-detail-head button{border:0;background:transparent;color:#111418}.rx-order-detail-summary{display:flex;justify-content:space-between;align-items:center;padding:12px 18px 15px}.rx-order-detail-summary strong,.rx-order-detail-summary small{display:block}.rx-order-detail-summary strong{font-size:16px}.rx-order-detail-summary small{margin-top:5px;color:#7f858b;font-size:10px}.rx-order-detail-summary>b{font-size:15px}.rx-order-detail-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid #e6e8ea;margin:0 18px}.rx-order-detail-tabs button{height:44px;border:0;background:#fff;color:#858a90;border-bottom:3px solid transparent;font:500 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-detail-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #edf0f2;margin:0 18px}.rx-order-detail-grid>div{padding:14px 0;border-bottom:1px solid #edf0f2}.rx-order-detail-grid>div:nth-child(odd){border-right:1px solid #edf0f2;padding-right:12px}.rx-order-detail-grid>div:nth-child(even){padding-left:12px}.rx-order-detail-grid small,.rx-order-detail-grid strong{display:block}.rx-order-detail-grid small{font-size:9px;color:#858a90}.rx-order-detail-grid strong{margin-top:5px;font-size:12px}.rx-order-setting{height:52px;margin:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f2;font-size:13px}.rx-switch{width:45px;height:26px;border:0;border-radius:14px;background:#d2d5d8;padding:3px;display:flex;align-items:center;justify-content:flex-start}.rx-switch i{display:block;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.16)}.rx-switch.on{background:#d7a21a;justify-content:flex-end}.rx-order-input{display:block;width:calc(100% - 36px);height:42px;margin:8px 18px;border:1px solid #e0e3e6;border-radius:11px;padding:0 11px;outline:0;font:600 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save,.rx-order-close{width:calc(100% - 36px);height:47px;margin:10px 18px 0;border:0;border-radius:13px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save{background:#f4d35e;color:#111418}.rx-order-close{background:#f2f3f5;color:#111418}.rx-close-confirm{position:absolute;left:12px;right:12px;bottom:12px;z-index:4;background:#fff;border-radius:22px;padding:20px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 8px 35px rgba(17,20,24,.2);border:1px solid #eceeef}.rx-close-confirm h3{margin:0 0 16px;font-size:19px}.rx-close-confirm>div{display:flex;justify-content:space-between;padding:8px 0;color:#737980;font-size:12px}.rx-close-confirm>div b{color:#111418}.rx-close-confirm button{width:100%;height:46px;border:0;border-radius:12px;margin-top:8px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-confirm button:first-of-type{background:#f4d35e;color:#111418}.rx-close-confirm button:last-of-type{background:#f1f2f4;color:#111418}
 .rx-trade-sheet{touch-action:none}.rx-trade-preview{display:flex;align-items:center;justify-content:space-between;margin-top:9px;padding:9px 11px;border-radius:11px;background:#f5f6f7}.rx-trade-preview span{font-size:10px;color:#7f858b}.rx-trade-preview strong{font-size:12px}
 
 /* Minimal trading refinements: compact position marker, real lot selection, and smaller action controls. */
@@ -1940,6 +1957,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
   const [screen, setScreen] = useState("dashboard");
   const [overlay, setOverlay] = useState(null);
   const [coins, setCoins] = useState(COINS);
+  const [coinActivity, setCoinActivity] = useState({});
   const [selectedCoin, setSelectedCoin] = useState(null);
 
   const handleNativeBack = useCallback(() => {
@@ -1972,7 +1990,21 @@ export default function SpaceCoinsDashboard({ onBack }) {
     let active = true;
     const load = async () => {
       const { data } = await supabase.from("space_coins").select("*").eq("status", "live").order("created_at", { ascending: false });
-      if (active) setCoins(data || []);
+      if (!active) return;
+      const ids = (data || []).map((coin) => coin.id).filter(Boolean);
+      const { data: activity } = ids.length ? await supabase.from("space_coin_trades").select("coin_id,side,quantity,price,close_price,status").in("coin_id", ids).limit(10000) : { data: [] };
+      const stats = {};
+      (activity || []).forEach((trade) => {
+        const key = trade.coin_id;
+        if (!stats[key]) stats[key] = { trades: 0, realizedPnl: 0 };
+        stats[key].trades += 1;
+        if (trade.status === "closed" && trade.close_price != null) {
+          const pnl = (Number(trade.close_price) - Number(trade.price)) * Number(trade.quantity) * (trade.side === "buy" ? 1 : -1);
+          stats[key].realizedPnl += Number.isFinite(pnl) ? pnl : 0;
+        }
+      });
+      setCoinActivity(stats);
+      setCoins(data || []);
     };
     load();
     const channel = supabase.channel("space-coins-registry").on("postgres_changes", { event: "*", schema: "public", table: "space_coins" }, load).subscribe();
@@ -2039,3 +2071,9 @@ export default function SpaceCoinsDashboard({ onBack }) {
     </>
   );
 }
+
+/* Final scoped Space Coin fixes: native picker, flexible sheets, standard history sizing. */
+.rx-upload{position:relative;cursor:pointer;touch-action:manipulation}
+.rx-upload input{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;opacity:0!important;z-index:10!important;display:block!important;cursor:pointer!important}
+.rx-detail-history-row strong{font-size:13px}.rx-detail-history-row small{font-size:10px}.rx-detail-history-row>b{font-size:12px}
+.rx-order-sheet,.rx-order-detail-sheet,.rx-trade-sheet{touch-action:none}
