@@ -5854,10 +5854,10 @@ function MoreTab({ autoScan, setAutoScan, analysis, inst, last, account, onLogou
   };
 
   useEffect(() => {
-    if (settingsSheet !== "sessions" && settingsSheet !== "loginHistory") return;
+    if (securitySheet !== "sessions" && securitySheet !== "loginHistory") return;
     setLoginHistoryLoading(true);
     loadSecuritySessions().finally(() => setLoginHistoryLoading(false));
-  }, [settingsSheet, loadSecuritySessions]);
+  }, [securitySheet, loadSecuritySessions]);
 
   const hashPin = async (pin) => {
     const bytes = new TextEncoder().encode(pin);
