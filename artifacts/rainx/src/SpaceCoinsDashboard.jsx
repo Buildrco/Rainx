@@ -392,6 +392,7 @@ function CreateCoin({ onBack, onCreated }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [logo, setLogo] = useState(null);
+  const logoInputRef = useRef(null);
   const [networkOpen, setNetworkOpen] = useState(false);
 
   const [form, setForm] = useState({
@@ -531,8 +532,14 @@ function CreateCoin({ onBack, onCreated }) {
 
           {step === 1 && (
             <>
-              <label className="rx-upload">
+              <label className="rx-upload" onClick={(event) => {
+                if (event.target !== logoInputRef.current) {
+                  event.preventDefault();
+                  logoInputRef.current?.click();
+                }
+              }}>
                 <input
+                  ref={logoInputRef}
                   type="file"
                   accept="image/*"
                   onChange={(e) => {
@@ -1524,12 +1531,7 @@ const createStyles = `
 
 export default function SpaceCoinsDashboard({ onBack }) {
   const [mode, setMode] = useState("space");
-  const [screen, setScreen] = useState(() => {
-    try {
-      const saved = sessionStorage.getItem("rainx-space-screen");
-      return ["dashboard", "create", "menu", "creator", "liquidity-manage", "liquidity-remove", "token-settings", "holders", "analytics", "transactions", "notifications"].includes(saved) ? saved : "dashboard";
-    } catch { return "dashboard"; }
-  });
+  const [screen, setScreen] = useState("dashboard");
   const [overlay, setOverlay] = useState(null);
   const [coins, setCoins] = useState(COINS);
   const [selectedCoin, setSelectedCoin] = useState(null);
@@ -1572,8 +1574,8 @@ export default function SpaceCoinsDashboard({ onBack }) {
   }, []);
 
   useEffect(() => {
-    try { sessionStorage.setItem("rainx-space-screen", screen); } catch {}
-  }, [screen]);
+    try { sessionStorage.removeItem("rainx-space-screen"); } catch {}
+  }, []);
 
   if (screen === "create") {
     return <CreateCoin onBack={() => setScreen("dashboard")} onCreated={(coin) => { setCoins((current) => [coin, ...current.filter((item) => item.id !== coin.id)]); setScreen("dashboard"); }} />;
