@@ -12,6 +12,7 @@ import {
 import { supabase } from "./supabaseClient";
 import CommunityTab, { ProfileFeed as CommunityProfileFeed, Composer as CommunityComposer, FollowListModal, Badge as CommunityBadge, formatCount } from "./CommunityTab";
 import { registerNativeBackHandler } from "./nativeBackStack";
+import { useNativeBottomSheet } from "./nativeBottomSheet";
 import FullChartView from "./FullChartView";
 import LightweightChart from "./LightweightChart";
 import SpaceCoinsIntro from "./SpaceCoinsIntro";
@@ -5065,9 +5066,11 @@ function GoldBarsIcon() {
 }
 
 function StableLightSheet({ children, onClose }) {
+  const sheetRef = useRef(null);
+  const nativeSheetOpen = useNativeBottomSheet(sheetRef, true, onClose);
   return (
-    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(15,20,25,.20)", backdropFilter:"blur(7px)", WebkitBackdropFilter:"blur(7px)", zIndex:600, display:"flex", alignItems:"flex-end", overscrollBehaviorY:"none" }}>
-      <div onClick={e=>e.stopPropagation()} style={{ width:"100%", maxWidth:480, margin:"0 auto", background:"#FFFFFF", border:"1px solid #E7E9EC", borderBottom:0, borderRadius:"22px 22px 0 0", padding:"11px 18px 28px", boxShadow:"0 -10px 35px rgba(15,20,25,.12)", transform:"translateY(0)", willChange:"transform", animation:"rxLightSheetUp .26s cubic-bezier(.22,1,.36,1)", maxHeight:"90dvh", overflowY:"auto", overscrollBehaviorY:"contain", WebkitOverflowScrolling:"touch" }}>
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(15,20,25,.20)", backdropFilter:nativeSheetOpen ? "none" : "blur(7px)", WebkitBackdropFilter:nativeSheetOpen ? "none" : "blur(7px)", zIndex:900, display:"flex", alignItems:"flex-end", overscrollBehaviorY:"none", pointerEvents:nativeSheetOpen ? "none" : "auto" }}>
+      <div ref={sheetRef} onClick={e=>e.stopPropagation()} style={{ width:"100%", maxWidth:480, margin:"0 auto", background:"#FFFFFF", border:"1px solid #E7E9EC", borderBottom:0, borderRadius:"22px 22px 0 0", padding:"11px 18px 28px", boxShadow:"0 -10px 35px rgba(15,20,25,.12)", transform:"translateY(0)", willChange:"transform", animation:"rxLightSheetUp .26s cubic-bezier(.22,1,.36,1)", maxHeight:"90dvh", overflowY:"auto", overscrollBehaviorY:"contain", WebkitOverflowScrolling:"touch" }}>
         <div style={{ width:42, height:5, borderRadius:3, background:"#D9DDE1", margin:"0 auto 18px" }} />
         {children}
       </div>
