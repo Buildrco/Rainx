@@ -129,7 +129,7 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
   ]);
   const pinEnabled = pinStatus.pin_exists === true;
   const backendBiometric = backend.biometricEnabled === true;
-  const pinRegistrationRequired = !pinEnabled && (
+  const serverPinRegistrationRequired = !pinEnabled && (
     backend.pinEnabled === true || backendBiometric || backend.appLock === true
   );
 
@@ -137,10 +137,11 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
     return {
       pinEnabled,
       appLock: pinEnabled || backend.appLock === true || backendBiometric,
-      biometricEnabled: backendBiometric,
+      // A biometric flag is never active until a server-side PIN exists.
+      biometricEnabled: pinEnabled && backendBiometric,
       pinLength: Math.max(4, Math.min(6, Number(pinStatus.pin_length) || 4)),
       pinLengthKnown: Number(pinStatus.pin_length) >= 4 && Number(pinStatus.pin_length) <= 6,
-      pinRegistrationRequired,
+      pinRegistrationRequired: serverPinRegistrationRequired,
       biometricRegistrationRequired: false,
     };
   }
@@ -150,8 +151,12 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
   const [localAppLock, localBiometric] = await Promise.all([
     secureGet(keys.appLock), secureGet(keys.biometric),
   ]);
-  const biometricEnabled = localBiometric === "1";
+  // A biometric must never be usable or displayed as enabled without a PIN.
+  const biometricEnabled = pinEnabled && localBiometric === "1";
   const pinLength = Number(pinStatus.pin_length) || 4;
+  const pinRegistrationRequired = !pinEnabled && (
+    serverPinRegistrationRequired || localAppLock === "1" || localBiometric === "1"
+  );
 
   return {
     pinEnabled,
@@ -160,7 +165,8 @@ export async function getNativeLockConfig(accountId?: string): Promise<NativeLoc
     pinLength: Math.max(4, Math.min(6, pinLength)),
     pinLengthKnown: pinLength >= 4 && pinLength <= 6,
     pinRegistrationRequired,
-    biometricRegistrationRequired: pinEnabled && backendBiometric && !biometricEnabled,
+    // If the account previously enabled biometrics, finish that setup only after the new PIN is saved.
+    biometricRegistrationRequired: backendBiometric && !biometricEnabled,
   };
 }
 
