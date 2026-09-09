@@ -73,8 +73,7 @@ function serializeSheet(root: HTMLElement) {
   clone.style.width = '100%';
   clone.style.height = 'auto';
   clone.style.minHeight = '0';
-  clone.style.maxHeight = 'none';
-  clone.style.height = '100%';
+  clone.style.maxHeight = '92vh';
   clone.style.overflowY = 'auto';
   clone.style.margin = '0';
   clone.className = clone.className
