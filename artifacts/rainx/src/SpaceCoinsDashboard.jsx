@@ -16,7 +16,6 @@ import {
   ChevronRight,
   CircleDollarSign,
   CircleHelp,
-  Clock3,
   Contact,
   Droplets,
   Home,
@@ -1159,7 +1158,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" }, horzLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" } },
       rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
       leftPriceScale: { visible: false },
-      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2 },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2, rightBarStaysOnScroll: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: true } },
     });
@@ -1288,7 +1287,6 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
 
   return <div className="rx-real-chart-shell">
     <div ref={containerRef} className="rx-real-chart" aria-label={`${chartType === "line" ? "Live line" : "Live candlestick"} Space Coin price chart`} onDoubleClick={resetPriceScale} />
-    <div className="rx-price-axis-gesture" aria-label="Price scale. Swipe vertically to zoom" onPointerDown={handlePriceAxisPointerDown} onPointerMove={handlePriceAxisPointerMove} onPointerUp={handlePriceAxisPointerUp} onPointerCancel={handlePriceAxisPointerUp} />
   </div>;
 }
 
@@ -1309,7 +1307,7 @@ function useSheetDrag(open, onClose, initial = 0.94) {
 
   const onPointerDown = (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
-    start.current = { y: e.clientY, x: e.clientX, progress: progressRef.current };
+    start.current = { y: e.clientY, x: e.clientX, progress: progressRef.current, pointerId: e.pointerId };
     e.currentTarget.setPointerCapture?.(e.pointerId);
     setDragging(true);
   };
@@ -1318,7 +1316,7 @@ function useSheetDrag(open, onClose, initial = 0.94) {
     if (!start.current) return;
     const dy = start.current.y - e.clientY;
     const dx = Math.abs(e.clientX - start.current.x);
-    if (dx > Math.abs(dy) && Math.abs(dy) < 8) return;
+    if (dx > Math.abs(dy) + 4) return;
     const height = Math.max(1, window.innerHeight || 800);
     setProgressSafe(start.current.progress + dy / height);
     if (e.cancelable) e.preventDefault();
@@ -1499,6 +1497,28 @@ function ClosePositionSheet({ order, livePrice, onClose, onConfirm }) {
       <div><span>Profit</span><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div>
       <button className="rx-close-position-confirm" onClick={() => onConfirm(order)}>Confirm</button>
       <button className="rx-close-position-cancel" onClick={onClose}>Cancel</button>
+    </section>
+  </div>;
+}
+
+function ChartTypeSheet({ value, onSelect, onClose }) {
+  const sheet = useSheetDrag(true, onClose, 0.94);
+  const options = [
+    ["candles", "Candlesticks", CandlestickChart],
+    ["line", "Line", BarChart3],
+  ];
+  return <div className="rx-chart-type-backdrop" onClick={onClose}>
+    <section
+      className="rx-chart-type-sheet"
+      style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 420ms cubic-bezier(.16,1,.3,1)" }}
+      onClick={(e) => e.stopPropagation()}
+      {...sheet.bind}
+    >
+      <div className="rx-sheet-drag-handle" />
+      <h3>Chart type</h3>
+      <div className="rx-chart-type-list">
+        {options.map(([key, label, Icon]) => <button key={key} onClick={() => onSelect(key)}><span><Icon size={21} />{label}</span>{value === key && <Check size={25} strokeWidth={2.5} />}</button>)}
+      </div>
     </section>
   </div>;
 }
@@ -1727,6 +1747,11 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       </button>
       <span className="rx-detail-top-spacer" aria-hidden="true" />
     </header>
+    {chartFullscreen && <button className="rx-fullscreen-account" onClick={() => setOrdersSheet(true)} aria-label="Open real account">
+      <span className="rx-real-pill">Real</span>
+      <strong>${Number(account?.cash_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+      <MoreVertical size={18} />
+    </button>}
 
     {!chartFullscreen && <div className="rx-chart-toolbar">
       <button className="rx-chart-one-click" aria-label="One-click trading"><span>ϟ</span><small>One-click</small></button>
@@ -1737,15 +1762,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       <button className="rx-chart-tool" onClick={() => setOrdersSheet(true)} aria-label="More"><MoreVertical size={25} /></button>
     </div>}
 
-    <div
-      className="rx-detail-scroll"
-      onTouchStart={(e) => { e.currentTarget.dataset.rxTouchY = String(e.touches[0]?.clientY ?? 0); }}
-      onTouchMove={(e) => {
-        const startY = Number(e.currentTarget.dataset.rxTouchY || 0);
-        const currentY = Number(e.touches[0]?.clientY || 0);
-        if (e.currentTarget.scrollTop <= 0 && currentY > startY && e.cancelable) e.preventDefault();
-      }}
-    >
+    <div className="rx-detail-scroll">
       {!chartFullscreen && <section className="rx-open-trades-card">
         <button className="rx-open-trades-side" onClick={() => { setOrdersSheetTab("open"); setOrdersSheet(true); }}><span>Open</span><b>{openOrders.length}</b></button>
         <button className="rx-open-trades-side" onClick={() => { setOrdersSheetTab("pending"); setOrdersSheet(true); }}><span>Pending</span><b>{pendingOrders.length}</b></button>
@@ -1818,7 +1835,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
         </div>
         <div className="rx-chart-control-wrap">
           <button className="rx-chart-control rx-chart-type-control" onClick={() => { setChartMenuOpen(v => !v); setTimeframeOpen(false); }} aria-label="Select chart type"><CandlestickChart size={20} /></button>
-          {chartMenuOpen && <div className="rx-chart-popover">{[["candles","Candles"],["line","Line"]].map(([type,label]) => <button key={type} className={chartType === type ? "active" : ""} onClick={() => { setChartType(type); setChartMenuOpen(false); }}>{label}</button>)}</div>}
+          {chartMenuOpen && <ChartTypeSheet value={chartType} onSelect={(type) => { setChartType(type); setChartMenuOpen(false); }} onClose={() => setChartMenuOpen(false)} />}
         </div>
         <button className="rx-chart-control rx-chart-fx" onClick={() => setOrdersSheet(true)} aria-label="Chart tools">ƒx</button>
       </div>}
@@ -1826,9 +1843,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       {notice && <div className="rx-detail-notice">{notice}</div>}
     </div>
 
-    {!chartFullscreen && <div className="rx-detail-actions"><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button></div>}
+    <div className="rx-detail-actions"><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button></div>
 
-    {chartFullscreen && <button className="rx-chart-fullscreen-exit" onClick={() => setChartFullscreen(false)} aria-label="Exit full chart"><ArrowLeft size={22} /></button>}
+    {chartFullscreen && <button className="rx-chart-fullscreen-exit" onClick={() => setChartFullscreen(false)} aria-label="Exit full chart"><Maximize2 size={21} /></button>}
 
     {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)`, transition: tradeSheetDrag.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Estimated value</span><strong>{tradeQuote ? `${fmt(Number(amount))} lots · ${formatTradeValue(Number(tradeQuote.notional))} @ $${fmt(Number(tradeQuote.execution_price))}` : `${fmt(Number(amount))} lots · calculating…`}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade || !tradeQuote} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
     {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} initialTab={ordersSheetTab} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
@@ -1845,11 +1862,11 @@ const detailStyles = `
 .rx-detail-account{justify-self:center;max-width:330px;min-width:0;height:44px;padding:0 12px 0 10px;border:1px solid #e2e5e7;border-radius:24px;background:#fff;display:flex;align-items:center;justify-content:center;gap:9px;color:#17191c;box-shadow:0 1px 3px rgba(17,20,24,.03)}.rx-real-pill{padding:4px 9px;border-radius:14px;background:#eef9f3;color:#3b9b72;font-size:12px;font-weight:500}.rx-detail-account strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;font-weight:700;letter-spacing:-.2px}.rx-detail-account svg{flex:0 0 auto}.rx-detail-top-spacer{display:block;width:42px;height:1px}.rx-detail-wallet,.rx-detail-status,.rx-detail-down{display:none}
 .rx-detail-scroll{position:relative;flex:1;min-width:0;width:100%;max-width:100%;box-sizing:border-box;min-height:0;overflow:hidden;padding:8px 16px calc(76px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;touch-action:pan-y;overscroll-behavior-block:none}
 .rx-detail-hero-card,.rx-detail-coin-name,.rx-detail-price,.rx-detail-change{display:none}
-.rx-real-chart-shell{position:absolute;inset:0;z-index:1;padding-top:36px}.rx-real-chart{width:100%;height:100%}.rx-detail-range{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 18px}.rx-detail-range button{height:39px;border:1px solid #e5e7eb;border-radius:20px;background:#fff;color:#8a8f96;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-range button.active{border-color:#111418;color:#111418;box-shadow:inset 0 0 0 1px #111418}
+.rx-real-chart-shell{position:absolute;inset:0;z-index:1;padding-top:36px;touch-action:none;overscroll-behavior:none}.rx-real-chart{width:100%;height:100%;touch-action:none}.rx-detail-range{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 18px}.rx-detail-range button{height:39px;border:1px solid #e5e7eb;border-radius:20px;background:#fff;color:#8a8f96;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-range button.active{border-color:#111418;color:#111418;box-shadow:inset 0 0 0 1px #111418}
 .rx-detail-summary,.rx-detail-stat-card,.rx-detail-history-card{border-radius:20px;background:#fff;border:1px solid #edf0f2;box-shadow:0 6px 24px rgba(17,20,24,.04)}.rx-detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#edf0f2;overflow:hidden}.rx-detail-summary>div{background:#fff;padding:15px}.rx-detail-summary span,.rx-detail-stat-card span{display:block;color:#8b9096;font-size:10px}.rx-detail-summary strong,.rx-detail-stat-card strong{display:block;margin-top:6px;font-size:14px}
 .rx-detail-stat-card{display:grid;grid-template-columns:1fr 1fr;gap:0;overflow:hidden}.rx-detail-stat-card>div{padding:18px 15px;border-bottom:1px solid #edf0f2}.rx-detail-stat-card>div:nth-child(odd){border-right:1px solid #edf0f2}
 .rx-detail-history-card{overflow:hidden}.rx-detail-history-row{min-height:67px;display:grid;grid-template-columns:45px 1fr auto;gap:10px;align-items:center;padding:10px 13px;border-bottom:1px solid #edf0f2}.rx-detail-history-row:last-child{border-bottom:0}.rx-detail-history-row>span{font-size:10px;font-weight:800}.rx-detail-history-row>span.buy{color:#d7a21a}.rx-detail-history-row>span.sell{color:#111418}.rx-detail-history-row strong,.rx-detail-history-row small{display:block}.rx-detail-history-row strong{font-size:11px}.rx-detail-history-row small{margin-top:4px;color:#8a8f95;font-size:8px}.rx-detail-history-row>b{font-size:10px}.rx-detail-empty-history{padding:25px 16px;color:#8a8f95;font-size:11px;text-align:center}
-.rx-detail-actions{position:absolute;z-index:10;left:0;right:0;bottom:5px;height:72px;padding:5px 16px calc(5px + env(safe-area-inset-bottom));display:grid;grid-template-columns:1fr 1fr;gap:10px;background:rgba(255,255,255,.96);border-top:1px solid #edf0f2;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}.rx-detail-actions button{border:0;border-radius:17px;font:800 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-buy{background:#F4D35E;color:#111418}.rx-detail-sell{background:#111418;color:#fff}.rx-detail-bell{background:#eef2fa;color:#111418;display:grid;place-items:center}
+.rx-detail-actions{position:absolute;z-index:10;left:0;right:0;bottom:5px;height:72px;padding:5px 16px calc(5px + env(safe-area-inset-bottom));display:grid;grid-template-columns:1fr 1fr;gap:10px;background:rgba(255,255,255,.96);border-top:1px solid #edf0f2;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}.rx-detail-actions button{border:0;border-radius:17px;font:800 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-buy{background:#2D91E8;color:#fff}.rx-detail-sell{background:#E64B4B;color:#fff}.rx-detail-bell{background:#eef2fa;color:#111418;display:grid;place-items:center}
 .rx-detail-notice{margin:12px 0;padding:11px 12px;border-radius:12px;background:#f6f7f8;color:#4e555c;font-size:10px;line-height:1.45}
 .rx-trade-sheet-backdrop{position:absolute;z-index:30;inset:0;background:rgba(17,20,24,.36);display:flex;align-items:flex-end}.rx-trade-sheet{width:100%;padding:10px 18px calc(18px + env(safe-area-inset-bottom));border-radius:24px 24px 0 0;background:#fff;box-shadow:0 -15px 45px rgba(17,20,24,.18)}.rx-trade-sheet-handle{width:42px;height:4px;border-radius:9px;background:#d8dadd;margin:0 auto 15px}.rx-trade-sheet h3{margin:0;font-size:19px}.rx-trade-sheet p{margin:5px 0 16px;color:#81868c;font-size:10px}.rx-trade-sheet label{display:block;color:#5e646a;font-size:10px;font-weight:700}.rx-trade-sheet input{width:100%;height:48px;margin-top:7px;border:1px solid #e0e3e6;border-radius:13px;padding:0 13px;outline:0;font:600 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-trade-sheet>button{width:100%;height:50px;margin-top:12px;border:0;border-radius:14px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-trade-sheet .confirm-buy{background:#F4D35E;color:#111418}.rx-trade-sheet .confirm-sell{background:#111418;color:#fff}
 .rx-empty-coins{min-height:55vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;color:#747a80}.rx-empty-coins strong{font-size:17px;color:#111418}.rx-empty-coins span{font-size:11px;max-width:250px;line-height:1.5}
@@ -1879,14 +1896,14 @@ const detailStyles = `
 .rx-open-trades-card>strong{margin-left:auto;min-width:0;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:500}
 .rx-open-trades-close{width:28px;height:28px;flex:0 0 28px;border:0;background:transparent;color:#df4d4d;display:grid;place-items:center;padding:0}
 .rx-open-trades-close:disabled{opacity:.45}
-.rx-detail-chart-wrap{height:calc(100% - 42px);min-height:360px;max-height:540px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
+.rx-detail-chart-wrap{height:calc(100% - 88px);min-height:0;max-height:none;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
 .rx-chart-symbol{position:absolute;z-index:25;left:12px;top:4px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}
 .rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:24px;min-width:0;max-width:calc(100% - 40px);border:0;padding:0;background:transparent;filter:drop-shadow(0 2px 5px rgba(17,20,24,.10));cursor:pointer}
 .rx-position-marker span{min-width:0;width:max-content;padding:0 7px;border-radius:6px 0 0 6px;display:grid;place-items:center;font:800 8px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
-.rx-position-marker b{min-width:0;width:max-content;padding:0 7px;border:1.5px solid currentColor;border-left:0;border-radius:0;background:#fff;display:grid;place-items:center;font:800 8px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap}
-.rx-position-marker i{width:25px;height:24px;border:1.5px solid currentColor;border-left:0;border-radius:0 6px 6px 0;background:#fff;color:#3f464d;display:grid;place-items:center}
-.rx-position-marker.buy span{background:#f4d35e}.rx-position-marker.sell span{background:#111418;color:#fff}
-.rx-position-marker.buy b,.rx-position-marker.buy i{border-color:#F4D35E}.rx-position-marker.sell b,.rx-position-marker.sell i{border-color:#111418}.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
+.rx-position-marker b{min-width:0;width:max-content;padding:0 7px;border:1px solid currentColor;border-left:0;border-radius:0;background:#fff;display:grid;place-items:center;font:800 8px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap}
+.rx-position-marker i{width:25px;height:24px;border:1px solid currentColor;border-left:0;border-radius:0 6px 6px 0;background:#fff;color:#3f464d;display:grid;place-items:center}
+.rx-position-marker.buy span{background:#2D91E8;color:#fff}.rx-position-marker.sell span{background:#E64B4B;color:#fff}
+.rx-position-marker.buy b,.rx-position-marker.buy i{border-color:#2D91E8}.rx-position-marker.sell b,.rx-position-marker.sell i{border-color:#E64B4B}.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
 .rx-chart-controls{position:absolute;z-index:30;left:13px;bottom:76px;display:flex;align-items:center;gap:6px;margin:0}
 .rx-chart-control-wrap{position:relative}
 .rx-chart-control{height:36px;min-width:50px;width:auto;padding:0 8px;border:0;border-radius:8px;background:#f3f4f5;color:#22272c;display:flex;align-items:center;justify-content:center;gap:4px;font:600 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;box-sizing:border-box;flex:0 0 auto}
@@ -1895,11 +1912,18 @@ const detailStyles = `
 .rx-chart-popover button{width:100%;height:34px;border:0;border-radius:8px;background:#fff;color:#4e555c;text-align:left;padding:0 10px;font:600 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
 .rx-chart-popover button.active{background:#f2f4f6;color:#111418}
 .rx-chart-fullscreen .rx-detail-top{display:none}
-.rx-chart-fullscreen .rx-detail-scroll{padding:0;position:absolute;inset:0}
-.rx-chart-fullscreen .rx-detail-chart-wrap{position:absolute;inset:0;height:auto;margin:0;background:#fff}
+.rx-chart-fullscreen .rx-detail-scroll{padding:0;position:absolute;inset:0;overflow:hidden;touch-action:none}
+.rx-chart-fullscreen .rx-detail-chart-wrap{position:absolute;left:0;right:0;top:78px;bottom:136px;height:auto;margin:0;background:#fff}
 .rx-chart-fullscreen .rx-real-chart-shell,.rx-chart-fullscreen .rx-real-chart{height:100%!important}
-.rx-chart-fullscreen .rx-chart-symbol{top:calc(14px + env(safe-area-inset-top))}
-.rx-close-position-backdrop,.rx-timeframe-backdrop{animation:rx-sheet-backdrop-in .22s ease-out both}.rx-close-position-backdrop,.rx-timeframe-backdrop{position:fixed;inset:0;z-index:70;background:rgba(17,20,24,.38);display:flex;align-items:flex-end;overflow:hidden;touch-action:none}.rx-close-position-sheet,.rx-timeframe-sheet{width:100%;max-height:92dvh;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.22);will-change:transform;touch-action:none;overflow:hidden}.rx-close-position-sheet{padding:9px 31px calc(18px + env(safe-area-inset-bottom))}.rx-close-position-sheet h3{margin:16px 0 19px;font-size:21px;letter-spacing:-.3px}.rx-close-position-sheet>div{display:flex;align-items:center;justify-content:space-between;padding:7px 0;color:#747a80;font-size:14px}.rx-close-position-sheet>div b{color:#17191c;font-weight:500}.rx-close-position-confirm,.rx-close-position-cancel{width:100%;height:48px;border:0;border-radius:11px;margin-top:13px;font:500 14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-position-confirm{background:#F4D35E;color:#111418}.rx-close-position-cancel{margin-top:9px;background:#f1f2f4;color:#272b2f}.rx-timeframe-sheet{height:min(78dvh,720px);padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}.rx-timeframe-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-timeframe-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.rx-timeframe-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-timeframe-list button:active{background:#f7f7f7}.rx-timeframe-list button svg{flex:0 0 auto;color:#17191c} 
+.rx-chart-fullscreen .rx-chart-symbol{top:18px;left:30px}
+.rx-chart-fullscreen .rx-chart-controls{bottom:76px}
+.rx-chart-fullscreen .rx-detail-actions{display:grid}
+.rx-fullscreen-account{position:absolute;z-index:101;top:calc(12px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);height:44px;max-width:330px;min-width:0;padding:0 12px 0 10px;border:1px solid #e2e5e7;border-radius:24px;background:#fff;display:flex;align-items:center;justify-content:center;gap:9px;color:#17191c;box-shadow:0 1px 3px rgba(17,20,24,.03)}
+.rx-fullscreen-account strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;font-weight:700;letter-spacing:-.2px}.rx-fullscreen-account svg{flex:0 0 auto}
+.rx-chart-fullscreen-exit{position:absolute;z-index:102;top:calc(12px + env(safe-area-inset-top));right:12px;left:auto;width:40px;height:40px;border:1px solid #dce1e5;border-radius:9px;background:#f5f6f7;color:#111418;display:grid;place-items:center}
+.rx-close-position-backdrop,.rx-timeframe-backdrop,.rx-chart-type-backdrop{animation:rx-sheet-backdrop-in .22s ease-out both}.rx-close-position-backdrop,.rx-timeframe-backdrop,.rx-chart-type-backdrop{position:fixed;inset:0;z-index:70;background:rgba(17,20,24,.38);display:flex;align-items:flex-end;overflow:hidden;touch-action:none}.rx-close-position-sheet,.rx-timeframe-sheet,.rx-chart-type-sheet{width:100%;max-height:92dvh;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.22);will-change:transform;touch-action:none;overflow:hidden}.rx-close-position-sheet{padding:9px 31px calc(18px + env(safe-area-inset-bottom))}.rx-close-position-sheet h3{margin:16px 0 19px;font-size:21px;letter-spacing:-.3px}.rx-close-position-sheet>div{display:flex;align-items:center;justify-content:space-between;padding:7px 0;color:#747a80;font-size:14px}.rx-close-position-sheet>div b{color:#17191c;font-weight:500}.rx-close-position-confirm,.rx-close-position-cancel{width:100%;height:48px;border:0;border-radius:11px;margin-top:13px;font:500 14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-position-confirm{background:#F4D35E;color:#111418}.rx-close-position-cancel{margin-top:9px;background:#f1f2f4;color:#272b2f}.rx-timeframe-sheet{height:min(78dvh,720px);padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}.rx-timeframe-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-timeframe-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.rx-timeframe-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-timeframe-list button:active{background:#f7f7f7}.rx-timeframe-list button svg{flex:0 0 auto;color:#17191c}
+.rx-chart-type-sheet{padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
+.rx-chart-type-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-chart-type-list{padding-bottom:8px}.rx-chart-type-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-chart-type-list button span{display:flex;align-items:center;gap:14px}.rx-chart-type-list button:active{background:#f7f7f7}
 .rx-chart-fullscreen-exit{position:absolute;z-index:100;top:calc(14px + env(safe-area-inset-top));left:12px;width:40px;height:40px;border:0;border-radius:20px;background:#f2f3f4;color:#111418;display:grid;place-items:center}
 
 `;
