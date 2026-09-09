@@ -536,7 +536,7 @@ function AddMarketSheet({ onClose, onSelect, onReplaceMarket, initialReplacement
 
   return (
     <div onClick={onClose} style={{ position:"fixed", inset:0, background:nativeSheetOpen ? "transparent" : "rgba(0,0,0,0.55)", zIndex:900, display:"flex", alignItems:"flex-end", overflow:"hidden", pointerEvents:nativeSheetOpen ? "none" : "auto" }}>
-      <div ref={sheetRef} onClick={e => e.stopPropagation()} style={{ background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", maxHeight:"96dvh", overflowY:"auto", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
+      <div ref={sheetRef} onClick={e => e.stopPropagation()} style={{ background:"#FFFFFF", borderRadius:"20px 20px 0 0", width:"100%", maxWidth:480, margin:"0 auto", padding:"0 0 32px", height:"min(96dvh, 820px)", maxHeight:"96dvh", overflowY:"auto", overflowX:"hidden", WebkitOverflowScrolling:"touch", overscrollBehaviorY:"contain", touchAction:"pan-y" }}>
         {body}
       </div>
     </div>
