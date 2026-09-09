@@ -2095,6 +2095,21 @@ function ProfileView({ userId, account, onBack, onOpenProfile, onDmUser }) {
         }
         if (process.env.NODE_ENV !== "production") console.error("Profile API fallback used:", apiErr?.message);
       }
+      // Resolve the live subscription before rendering the profile badge. This avoids a
+      // cached/placeholder profile briefly replacing the verified state on native open.
+      const { data: subscription } = await supabase
+        .from("subscriptions")
+        .select("status,expires_at,plan")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle();
+      const subscriptionActive = !!subscription && (subscription.plan === "vip_lifetime" || (subscription.expires_at && new Date(subscription.expires_at) > new Date()));
+      setProfile((current) => current ? {
+        ...current,
+        isPro: subscriptionActive,
+        badge: current.badge || (subscriptionActive ? (subscription.plan === "yearly" ? "golden" : "blue") : null),
+      } : current);
+
       const { data: postRows } = await supabase
         .from("community_posts")
         .select("*")
@@ -2361,7 +2376,7 @@ function ProfileView({ userId, account, onBack, onOpenProfile, onDmUser }) {
       <div style={{ padding:"0 16px 8px" }}>
         <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:2, flexWrap:"wrap" }}>
           <span style={{ fontFamily:FONT_HEAD, fontWeight:800, fontSize:20, color:T.paper, lineHeight:1.25 }}>{profile.full_name || profile.display_name}</span>
-          <Badge isAdmin={profile.is_admin} badge={profile.badge} isPro={false} isOfficial={profile.is_official} />
+          <Badge isAdmin={profile.is_admin} badge={profile.badge} isPro={!!profile.isPro} isOfficial={profile.is_official} />
         </div>
         <div style={{ fontSize:13.5, color:T.muted, marginBottom:8 }}>@{handle}</div>
         {profile.bio && <div style={{ fontSize:13.5, color:T.paper, marginBottom:10, lineHeight:1.65 }}>{profile.bio}</div>}
@@ -2811,9 +2826,8 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
   const [profilesMap, setProfilesMap] = useState({});
   const [likeData, setLikeData] = useState({});
   const [repostData, setRepostData] = useState({});
-  const [viewingUserId, setViewingUserIdState] = useState(() => {
-    try { return localStorage.getItem("community-viewing-user") || null; } catch { return null; }
-  });
+  // A profile overlay is transient UI state; never restore it from storage on app launch.
+  const [viewingUserId, setViewingUserIdState] = useState(null);
   const pushCommunityOverlay = useCallback((overlay) => {
     try { window.history.pushState({ ...(window.history.state || {}), rainxRoute: true, rainxCommunityOverlay: overlay }, "", window.location.href); } catch {}
   }, []);
@@ -2921,13 +2935,6 @@ export default function CommunityTab({ account, entitlement, themeTokens, onView
     return () => window.removeEventListener("popstate", onCommunityPop);
   }, [chatOpen, viewingUserId]);
 
-  // Persist viewingUserId so page refresh returns to the same profile
-  useEffect(() => {
-    try {
-      if (viewingUserId) localStorage.setItem("community-viewing-user", viewingUserId);
-      else localStorage.removeItem("community-viewing-user");
-    } catch {}
-  }, [viewingUserId]);
 
   // Notify parent when community profile view opens/closes (for bottom nav hiding)
   useEffect(() => {
