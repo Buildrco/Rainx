@@ -709,7 +709,7 @@ function Composer({ account, onPosted, onClose, compact, themeTokens }) {
           <div ref={nativeSheetRef} style={{ position: "absolute", bottom: 0, left: 0, right: 0, maxWidth: 480, margin: "0 auto", height: "92dvh", background: T.ink, borderRadius: "20px 20px 0 0", display: "flex", flexDirection: "column" }} onClick={(e) => e.stopPropagation()}>
             {/* drag handle */}
             <div style={{ flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 10 }}>
-              <div style={{ width: 36, height: 4, borderRadius: 2, background: T.cardBorder }} />
+              <div data-sheet-handle style={{ width: 36, height: 4, borderRadius: 2, background: T.cardBorder }} />
             </div>
             {/* header */}
             <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px 12px", borderBottom: `1px solid ${T.cardBorder}` }}>
