@@ -75,7 +75,17 @@ function serializeSheet(root: HTMLElement) {
   clone.style.minHeight = '0';
   clone.style.maxHeight = '92vh';
   clone.style.overflowY = 'auto';
+  clone.style.overflowX = 'hidden';
+  clone.style.scrollBehavior = 'auto';
   clone.style.margin = '0';
+
+  const handle = clone.querySelector('[data-sheet-handle]');
+  if (handle && handle.parentElement) {
+    handle.parentElement.style.position = 'sticky';
+    handle.parentElement.style.top = '0';
+    handle.parentElement.style.zIndex = '20';
+    handle.parentElement.style.background = 'inherit';
+  }
   clone.className = clone.className
     .split(/\s+/)
     .filter((token) => !/^(fixed|inset-|top-|right-|bottom-|left-|translate-|animate-|slide-)/.test(token))
