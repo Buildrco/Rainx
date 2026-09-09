@@ -1855,7 +1855,7 @@ const detailStyles = `
 .rx-open-trades-card>strong{margin-left:auto;min-width:0;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:500}
 .rx-open-trades-close{width:30px;height:30px;flex:0 0 30px;border:0;background:transparent;color:#df4d4d;display:grid;place-items:center;padding:0}
 .rx-open-trades-close:disabled{opacity:.45}
-.rx-detail-chart-wrap{height:455px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
+.rx-detail-chart-wrap{height:calc(100dvh - 285px);min-height:390px;max-height:560px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
 .rx-chart-symbol{position:absolute;z-index:5;left:30px;top:8px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}
 .rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:26px;min-width:0;max-width:calc(100% - 48px);border:0;padding:0;background:transparent;filter:drop-shadow(0 2px 6px rgba(17,20,24,.12));cursor:pointer}
 .rx-position-marker span{min-width:0;width:max-content;padding:0 8px;border-radius:7px 0 0 7px;display:grid;place-items:center;font:800 9px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
