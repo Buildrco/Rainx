@@ -6,18 +6,22 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUpRight,
+  AlarmClockPlus,
   BarChart3,
   Bell,
+  CandlestickChart,
   BriefcaseBusiness,
   Check,
   ChevronDown,
   ChevronRight,
   CircleDollarSign,
   CircleHelp,
+  Clock3,
   Contact,
   Droplets,
   Home,
   Menu,
+  MoreVertical,
   Plus,
   ReceiptText,
   Rocket,
@@ -977,12 +981,13 @@ function Metric({ label, value }) { return <div className="rx-creator-metric"><s
 
 function NativeTabs({ active }) { return <nav className="rx-native-tabs">{["Home", "Space Coins", "Wallet", "Profile"].map((name) => <span className={active === name ? "active" : ""} key={name}><span className="rx-tab-dot" />{name}</span>)}</nav>; }
 
-function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordinate }) {
+function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryPrice, onPriceChange, onPriceCoordinate, onEntryCoordinate }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const liveBarRef = useRef(null);
   const loadSeqRef = useRef(0);
+  const entryPriceLineRef = useRef(null);
 
   const RANGE_MS = useMemo(() => ({
     "24h": 24 * 60 * 60 * 1000,
@@ -990,8 +995,8 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
     "1m": 30 * 24 * 60 * 60 * 1000,
     "3m": 90 * 24 * 60 * 60 * 1000,
   }), []);
-  const BUCKET_SECONDS = useMemo(() => ({ "24h": 60, "7d": 5 * 60, "1m": 30 * 60, "3m": 60 * 60 }), []);
-  const bucketSeconds = BUCKET_SECONDS[range] || 60;
+  const BUCKET_SECONDS = useMemo(() => ({ "1m": 60, "5m": 5 * 60, "15m": 15 * 60, "30m": 30 * 60, "1h": 60 * 60, "4h": 4 * 60 * 60, "1D": 24 * 60 * 60 }), []);
+  const bucketSeconds = BUCKET_SECONDS[timeframe] || ({ "24h": 60, "7d": 5 * 60, "1m": 30 * 60, "3m": 60 * 60 }[range] || 60);
 
   const aggregate = useCallback((ticks, fallback) => {
     const map = new Map();
@@ -1224,6 +1229,40 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
     return () => { active = false; window.clearInterval(timer); supabase.removeChannel(channel); };
   }, [coin?.id, range, chartType, RANGE_MS, bucketSeconds, publish]);
 
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return undefined;
+
+    if (entryPriceLineRef.current) {
+      try { series.removePriceLine(entryPriceLineRef.current); } catch {}
+      entryPriceLineRef.current = null;
+    }
+
+    const price = Number(entryPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      onEntryCoordinate?.(null);
+      return undefined;
+    }
+
+    entryPriceLineRef.current = series.createPriceLine({
+      price,
+      color: "#2D91E8",
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: ""
+    });
+
+    onEntryCoordinate?.(series.priceToCoordinate?.(price) ?? null);
+
+    return () => {
+      if (entryPriceLineRef.current) {
+        try { series.removePriceLine(entryPriceLineRef.current); } catch {}
+        entryPriceLineRef.current = null;
+      }
+    };
+  }, [entryPrice, chartType, onEntryCoordinate]);
+
   return <div className="rx-real-chart-shell">
     <div ref={containerRef} className="rx-real-chart" aria-label={`${chartType === "line" ? "Live line" : "Live candlestick"} Space Coin price chart`} onDoubleClick={resetPriceScale} />
     <div className="rx-price-axis-gesture" aria-label="Price scale. Swipe vertically to zoom" onPointerDown={handlePriceAxisPointerDown} onPointerMove={handlePriceAxisPointerMove} onPointerUp={handlePriceAxisPointerUp} onPointerCancel={handlePriceAxisPointerUp} />
@@ -1384,7 +1423,10 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const market = coin || null;
   const [range, setRange] = useState("24h");
   const [chartType, setChartType] = useState("candles");
-  const [activeTab, setActiveTab] = useState("Overview");
+  const [timeframe, setTimeframe] = useState("15m");
+  const [timeframeOpen, setTimeframeOpen] = useState(false);
+  const [chartMenuOpen, setChartMenuOpen] = useState(false);
+  const [chartFullscreen, setChartFullscreen] = useState(false);
   const [livePrice, setLivePrice] = useState(Number(market?.current_price || market?.initial_price || 0.000001));
   const [chartData, setChartData] = useState([]);
   const [positionY, setPositionY] = useState(null);
@@ -1552,8 +1594,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
 
-  return <main className="rx-native-screen rx-coin-detail-screen">
+  return <main className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}>
     <style>{styles + createStyles + detailStyles}</style>
+
     <header className="rx-detail-top">
       <button className="rx-detail-back" onClick={onBack} aria-label="Back"><ArrowLeft size={23} /></button>
       <button className="rx-detail-wallet" onClick={() => setOrdersSheet(true)} aria-label="Open orders"><span className="rx-detail-lock">◉</span><strong>${Number(account?.cash_balance ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>{openOrders.length > 0 && <em>{openOrders.length}</em>}</button>
@@ -1561,27 +1604,55 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       <button className="rx-detail-down" onClick={() => setOrdersSheet(true)} aria-label="Orders"><ChevronDown size={21} /></button>
     </header>
 
-    <div className="rx-detail-scroll">
-      <div className="rx-detail-tabs">
-        {['Overview', 'Statistics', 'History data'].map((tab) => <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>)}
-      </div>
-      <section className="rx-detail-hero-card"><div className="rx-detail-coin-name">{market.name}</div><div className="rx-detail-price">${fmt(livePrice)}</div><div className={`rx-detail-change ${displayChange >= 0 ? "up" : "down"}`}>● {displayChange >= 0 ? "+" : ""}{displayChange.toFixed(2)}%</div></section>
+    {!chartFullscreen && <div className="rx-chart-toolbar">
+      <button className="rx-chart-one-click" aria-label="One-click trading"><span>ϟ</span><small>One-click</small></button>
+      <div className="rx-chart-toolbar-spacer" />
+      <button className="rx-chart-tool" onClick={() => setOrdersSheet(true)} aria-label="Alarm"><AlarmClockPlus size={24} /></button>
+      <button className="rx-chart-tool" onClick={() => setChartFullscreen(true)} aria-label="Full chart view"><Maximize2 size={24} /></button>
+      <button className="rx-chart-tool" onClick={() => primaryOrder && setSelectedOrder(primaryOrder)} aria-label="Chart settings"><Settings size={24} /></button>
+      <button className="rx-chart-tool" onClick={() => setOrdersSheet(true)} aria-label="More"><MoreVertical size={25} /></button>
+    </div>}
 
-      {activeTab === "Overview" && <>
-        <section className="rx-detail-chart-wrap">
-          <CoinPriceChart coin={market} range={range} chartType={chartType} onPriceChange={handlePriceChange} onPriceCoordinate={setPositionY} />
-          {primaryOrder && <button className={`rx-position-marker ${primaryOrder.side === "buy" ? "buy" : "sell"}`} style={{ top: `${Math.max(8, Math.min(225, Number.isFinite(positionY) ? positionY - 15 : 26))}px` }} onClick={() => setOrdersSheet(true)} aria-label="Open position details"><span>{Number(primaryOrder.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</span><b className={primaryPnl >= 0 ? "profit" : "loss"}>{primaryPnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(primaryPnl))}</b></button>}
-        </section>
-        <div className="rx-chart-mode"><button className={chartType === "line" ? "active" : ""} onClick={() => setChartType("line")}>Line</button><button className={chartType === "candles" ? "active" : ""} onClick={() => setChartType("candles")}>Candlesticks</button></div>
-        <div className="rx-detail-range">{[['24h','24 Hours'],['7d','7 Days'],['1m','1 Month'],['3m','3 Months']].map(([key,label]) => <button key={key} className={range === key ? "active" : ""} onClick={() => setRange(key)}>{label}</button>)}</div>
-        
-      </>}
-      {activeTab === "Statistics" && <section className="rx-detail-stat-card"><div><span>Market Cap</span><strong>${Number(market.market_cap || Number(market.total_supply || 0) * livePrice).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Liquidity</span><strong>${Number(market.liquidity || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>24h Volume</span><strong>${Number(market.volume_24h || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></div><div><span>Holders</span><strong>{Number(market.holder_count || 0).toLocaleString()}</strong></div><div><span>Total Supply</span><strong>{Number(market.total_supply || 0).toLocaleString()}</strong></div><div><span>Network</span><strong>{market.network || "Solana"}</strong></div></section>}
-      {activeTab === "History data" && <section className="rx-detail-history-card">{closedOrders.length ? closedOrders.map((trade) => <button key={trade.id} className="rx-detail-history-row" onClick={() => setSelectedOrder(trade)}><span className={trade.side === "buy" ? "buy" : "sell"}>{trade.side === "buy" ? "Buy" : "Sell"}</span><div><strong>{Number(trade.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</strong><small>{new Date(trade.closed_at || trade.created_at).toLocaleString()}</small></div><b className={((Number(trade.close_price) - Number(trade.price)) * (trade.side === "buy" ? 1 : -1)) >= 0 ? "profit" : "loss"}>{formatMoney((Number(trade.close_price) - Number(trade.price)) * Number(trade.quantity) * (trade.side === "buy" ? 1 : -1))}</b></button>) : <div className="rx-detail-empty-history">No closed trades yet. Your completed real trades will appear here.</div>}</section>}
+    <div className="rx-detail-scroll">
+      {!chartFullscreen && <section className="rx-open-trades-card">
+        <div className="rx-open-trades-side"><span>Open</span><b>{openOrders.length}</b></div>
+        <div className="rx-open-trades-side"><span>Pending</span><b>{pendingOrders.length}</b></div>
+        <strong className={openOrders.reduce((sum, order) => sum + selectedPnl(order), 0) >= 0 ? "profit" : "loss"}>
+          {(() => { const pnl = openOrders.reduce((sum, order) => sum + selectedPnl(order), 0); return `${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}`; })()}
+        </strong>
+        <button className="rx-open-trades-close" onClick={() => primaryOrder && closeOrder(primaryOrder)} disabled={!primaryOrder} aria-label="Close trade"><X size={32} /></button>
+      </section>}
+
+      {!chartFullscreen && <section className="rx-detail-hero-card"><div className="rx-detail-coin-name">{market.name}</div><div className="rx-detail-price">${fmt(livePrice)}</div><div className={`rx-detail-change ${displayChange >= 0 ? "up" : "down"}`}>● {displayChange >= 0 ? "+" : ""}{displayChange.toFixed(2)}%</div></section>}
+
+      <section className="rx-detail-chart-wrap">
+        <div className="rx-chart-symbol">{market.symbol || market.name}<ChevronDown size={18} /></div>
+        <CoinPriceChart coin={market} range={range} timeframe={timeframe} chartType={chartType} entryPrice={primaryOrder?.price} onPriceChange={handlePriceChange} onPriceCoordinate={setPositionY} onEntryCoordinate={setPositionY} />
+        {primaryOrder && <button className={`rx-position-marker ${primaryOrder.side === "buy" ? "buy" : "sell"}`} style={{ top: `${Math.max(8, Math.min(225, Number.isFinite(positionY) ? positionY - 15 : 26))}px` }} onClick={() => setOrdersSheet(true)} aria-label="Open position details">
+          <span>{Number(primaryOrder.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>
+          <b className={primaryPnl >= 0 ? "profit" : "loss"}>{primaryPnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(primaryPnl))}</b>
+          <i onClick={(e) => { e.stopPropagation(); closeOrder(primaryOrder); }} aria-label="Close trade"><X size={16} /></i>
+        </button>}
+      </section>
+
+      {!chartFullscreen && <div className="rx-chart-controls">
+        <div className="rx-chart-control-wrap">
+          <button className="rx-chart-control" onClick={() => { setTimeframeOpen(v => !v); setChartMenuOpen(false); }} aria-label="Select timeframe"><Clock3 size={17} /><span>{timeframe}</span></button>
+          {timeframeOpen && <div className="rx-chart-popover">{["1m","5m","15m","30m","1h","4h","1D"].map(tf => <button key={tf} className={timeframe === tf ? "active" : ""} onClick={() => { setTimeframe(tf); setTimeframeOpen(false); }}>{tf}</button>)}</div>}
+        </div>
+        <div className="rx-chart-control-wrap">
+          <button className="rx-chart-control" onClick={() => { setChartMenuOpen(v => !v); setTimeframeOpen(false); }} aria-label="Select chart type"><CandlestickChart size={18} /><span>{chartType === "candles" ? "Candles" : "Line"}</span></button>
+          {chartMenuOpen && <div className="rx-chart-popover">{[["candles","Candles"],["line","Line"]].map(([type,label]) => <button key={type} className={chartType === type ? "active" : ""} onClick={() => { setChartType(type); setChartMenuOpen(false); }}>{label}</button>)}</div>}
+        </div>
+        <button className="rx-chart-control rx-chart-fx" onClick={() => setOrdersSheet(true)} aria-label="Chart tools">ƒx</button>
+      </div>}
+
       {notice && <div className="rx-detail-notice">{notice}</div>}
     </div>
 
-    <div className="rx-detail-actions"><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button><button className="rx-detail-bell" onClick={() => setOrdersSheet(true)} aria-label="Orders"><Bell size={23} /></button></div>
+    {!chartFullscreen && <div className="rx-detail-actions"><button className="rx-detail-buy" onClick={() => { setTradeSheet("buy"); setNotice(""); }}><span>Buy</span></button><button className="rx-detail-sell" onClick={() => { setTradeSheet("sell"); setNotice(""); }}><span>Sell</span></button><button className="rx-detail-bell" onClick={() => setOrdersSheet(true)} aria-label="Orders"><Bell size={23} /></button></div>}
+
+    {chartFullscreen && <button className="rx-chart-fullscreen-exit" onClick={() => setChartFullscreen(false)} aria-label="Exit full chart"><ArrowLeft size={22} /></button>}
 
     {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)`, transition: tradeSheetDrag.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Estimated value</span><strong>{tradeQuote ? `${fmt(Number(amount))} lots · ${formatTradeValue(Number(tradeQuote.notional))} @ $${fmt(Number(tradeQuote.execution_price))}` : `${fmt(Number(amount))} lots · calculating…`}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade || !tradeQuote} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
     {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
@@ -1624,6 +1695,41 @@ const detailStyles = `
 .rx-order-action-menu{padding:7px 18px 20px}.rx-order-action{width:100%;min-height:66px;margin-top:8px;border:1px solid #e9ebed;border-radius:15px;background:#fff;display:grid;grid-template-columns:1fr 22px;gap:2px;text-align:left;padding:13px 14px;align-items:center}.rx-order-action strong{font-size:14px;color:#111418}.rx-order-action small{font-size:9px;color:#858a90;grid-column:1}.rx-order-action svg{grid-column:2;grid-row:1 / span 2}.rx-order-action.close{background:#fafafa}.rx-order-action.close strong{color:#111418}.rx-modify-head{height:42px;padding:0 18px;display:flex;align-items:center;gap:18px;border-bottom:1px solid #edf0f2}.rx-modify-head button{border:0;background:transparent;display:flex;align-items:center;gap:5px;font:700 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-modify-head strong{font-size:15px}.rx-closed-order-state{min-height:38vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#747a80}.rx-closed-order-state svg{color:#39ad7a}.rx-closed-order-state strong{font-size:18px;color:#111418}.rx-closed-order-state span{font-size:10px}.rx-closed-order-state b{font-size:18px}
 
 .rx-detail-history-row strong{font-size:13px}.rx-detail-history-row small{font-size:10px}.rx-detail-history-row>b{font-size:12px}
+/* Space Coins dashboard: reference-matched trading chrome only. */
+.rx-chart-toolbar{height:64px;flex:0 0 64px;padding:0 30px;display:flex;align-items:center;gap:18px;background:#fff}
+.rx-chart-toolbar-spacer{flex:1}
+.rx-chart-one-click{display:flex;align-items:center;gap:8px;border:0;background:transparent;color:#b6b9bd;padding:0;font:500 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+.rx-chart-one-click span{width:43px;height:28px;border-radius:16px;background:#d3d5d8;color:#fff;display:grid;place-items:center;font-size:15px}
+.rx-chart-tool{width:40px;height:40px;border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0}
+.rx-open-trades-card{height:62px;margin:0 16px 9px;border-radius:11px;background:#f7f8f8;display:flex;align-items:center;padding:0 12px 0 30px;gap:28px}
+.rx-open-trades-side{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.rx-open-trades-side span{font-size:16px;color:#20252a}
+.rx-open-trades-side b{min-width:30px;height:30px;border-radius:50%;background:#eef0f2;color:#353a40;display:grid;place-items:center;font-size:12px;font-weight:600}
+.rx-open-trades-card>strong{margin-left:auto;font-size:16px;font-weight:500}
+.rx-open-trades-close{width:42px;height:42px;border:0;background:transparent;color:#df4d4d;display:grid;place-items:center;padding:0}
+.rx-open-trades-close:disabled{opacity:.45}
+.rx-detail-chart-wrap{height:255px;position:relative;margin:0 -2px}
+.rx-chart-symbol{position:absolute;z-index:5;left:30px;top:8px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}
+.rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:30px;min-width:0;max-width:calc(100% - 55px);border:0;padding:0;background:transparent;filter:drop-shadow(0 3px 8px rgba(17,20,24,.12));cursor:pointer}
+.rx-position-marker span{min-width:52px;width:auto;padding:0 9px;border-radius:8px 0 0 8px;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
+.rx-position-marker b{min-width:86px;width:auto;padding:0 9px;border:1.5px solid currentColor;border-left:0;border-radius:0;background:#fff;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap}
+.rx-position-marker i{width:34px;height:30px;border:1.5px solid #d9dcdf;border-left:0;border-radius:0 8px 8px 0;background:#fff;color:#3f464d;display:grid;place-items:center}
+.rx-position-marker.buy span{background:#f4d35e}.rx-position-marker.sell span{background:#111418;color:#fff}
+.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
+.rx-chart-controls{display:flex;align-items:center;gap:9px;margin:5px 0 9px}
+.rx-chart-control-wrap{position:relative}
+.rx-chart-control{height:44px;min-width:72px;padding:0 12px;border:0;border-radius:10px;background:#f3f4f5;color:#22272c;display:flex;align-items:center;justify-content:center;gap:7px;font:600 12px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+.rx-chart-fx{min-width:44px;width:44px;font-size:17px;font-weight:500}
+.rx-chart-popover{position:absolute;z-index:30;left:0;bottom:49px;min-width:105px;padding:6px;border:1px solid #e5e7e9;border-radius:12px;background:#fff;box-shadow:0 8px 28px rgba(17,20,24,.14)}
+.rx-chart-popover button{width:100%;height:34px;border:0;border-radius:8px;background:#fff;color:#4e555c;text-align:left;padding:0 10px;font:600 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
+.rx-chart-popover button.active{background:#f2f4f6;color:#111418}
+.rx-chart-fullscreen .rx-detail-top{display:none}
+.rx-chart-fullscreen .rx-detail-scroll{padding:0;position:absolute;inset:0}
+.rx-chart-fullscreen .rx-detail-chart-wrap{position:absolute;inset:0;height:auto;margin:0;background:#fff}
+.rx-chart-fullscreen .rx-real-chart-shell,.rx-chart-fullscreen .rx-real-chart{height:100%!important}
+.rx-chart-fullscreen .rx-chart-symbol{top:calc(14px + env(safe-area-inset-top))}
+.rx-chart-fullscreen-exit{position:absolute;z-index:100;top:calc(14px + env(safe-area-inset-top));left:12px;width:40px;height:40px;border:0;border-radius:20px;background:#f2f3f4;color:#111418;display:grid;place-items:center}
+
 `;
 
 function LiquidityScreen({ onBack, remove = false }) {
