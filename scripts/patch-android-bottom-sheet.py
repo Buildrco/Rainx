@@ -12,16 +12,6 @@ if not ANDROID.exists():
 
 PLUGIN_TARGET.parent.mkdir(parents=True, exist_ok=True)
 plugin_text = PLUGIN_SOURCE.read_text(encoding="utf-8")
-plugin_text = plugin_text.replace(
-    "FrameLayout.LayoutParams.MATCH_PARENT,\n                FrameLayout.LayoutParams.MATCH_PARENT",
-    "FrameLayout.LayoutParams.MATCH_PARENT,\n                (int) (screenHeight * 0.94f)"
-).replace(
-    "loadHtml(html, baseUrl);\n            expandSheet();\n            call.resolve();",
-    "updateSheet(html, baseUrl);\n            call.resolve();"
-).replace(
-    "behavior.setFitToContents(true);\n        behavior.setPeekHeight(BottomSheetBehavior.PEEK_HEIGHT_AUTO);\n        behavior.setState(BottomSheetBehavior.STATE_EXPANDED);",
-    "behavior.setFitToContents(true);\n        behavior.setPeekHeight(0);\n        behavior.setState(BottomSheetBehavior.STATE_EXPANDED);\n        android.view.ViewGroup.LayoutParams sheetParams = bottomSheet.getLayoutParams();\n        sheetParams.height = (int) (getContext().getResources().getDisplayMetrics().heightPixels * 0.94f);\n        bottomSheet.setLayoutParams(sheetParams);"
-)
 PLUGIN_TARGET.write_text(plugin_text, encoding="utf-8")
 
 app_gradle = ANDROID / "app/build.gradle"
