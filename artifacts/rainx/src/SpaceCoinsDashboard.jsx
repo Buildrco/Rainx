@@ -1394,8 +1394,8 @@ function OrderTabs({ active, setActive }) {
   </div>;
 }
 
-function OrderSheet({ market, orders, pending, closed, livePrice, onClose, onSelectOrder }) {
-  const [active, setActive] = useState("open");
+function OrderSheet({ market, orders, pending, closed, livePrice, initialTab = "open", onClose, onSelectOrder }) {
+  const [active, setActive] = useState(initialTab);
   const sheet = useSheetDrag(true, onClose, 0.94);
   const rows = active === "open" ? orders : active === "pending" ? pending : closed;
   return <div className="rx-order-backdrop" onClick={onClose}>
@@ -1529,6 +1529,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const [account, setAccount] = useState(null);
   const [tradeSheet, setTradeSheet] = useState(null);
   const [ordersSheet, setOrdersSheet] = useState(false);
+  const [ordersSheetTab, setOrdersSheetTab] = useState("open");
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [closeConfirmOrder, setCloseConfirmOrder] = useState(null);
   const [amount, setAmount] = useState("");
@@ -1722,7 +1723,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       }}
     >
       {!chartFullscreen && <section className="rx-open-trades-card">
-        <div className="rx-open-trades-side"><span>Open</span><b>{openOrders.length}</b></div>
+        <button className="rx-open-trades-side" onClick={() => { setOrdersSheetTab("open"); setOrdersSheet(true); }}><span>Open</span><b>{openOrders.length}</b></button>
         <div className="rx-open-trades-side"><span>Pending</span><b>{pendingOrders.length}</b></div>
         <strong className={openOrders.reduce((sum, order) => sum + selectedPnl(order), 0) >= 0 ? "profit" : "loss"}>
           {(() => { const pnl = openOrders.reduce((sum, order) => sum + selectedPnl(order), 0); return `${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}`; })()}
@@ -1740,11 +1741,50 @@ function CreatorDashboard({ onBack, onManage, coin }) {
           <ChevronDown size={18} />
         </div>
         <CoinPriceChart coin={market} range={range} timeframe={timeframe} chartType={chartType} entryPrice={primaryOrder?.price} onPriceChange={handlePriceChange} onEntryCoordinate={setPositionY} />
-        {primaryOrder && <button className={`rx-position-marker ${primaryOrder.side === "buy" ? "buy" : "sell"}`} style={{ top: `${Math.max(8, Math.min(225, Number.isFinite(positionY) ? positionY - 15 : 26))}px` }} onClick={() => setOrdersSheet(true)} aria-label="Open position details">
-          <span>{Number(primaryOrder.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>
-          <b className={primaryPnl >= 0 ? "profit" : "loss"}>{primaryPnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(primaryPnl))}</b>
-          <i onClick={(e) => { e.stopPropagation(); setCloseConfirmOrder(primaryOrder); }} aria-label="Close trade"><X size={16} /></i>
-        </button>}
+        {openOrders.map((order, index) => {
+  const orderPnl = selectedPnl(order);
+  const orderPrice = Number(order.price);
+  const values = chartData.map((point) => Number(point.value)).filter(Number.isFinite);
+  const chartMax = Math.max(...values, livePrice, orderPrice);
+  const chartMin = Math.min(...values, livePrice, orderPrice);
+  const chartHeight = Math.max(390, Math.min(560, window.innerHeight - 285));
+  const usableHeight = Math.max(1, chartHeight - 32);
+  const ratio = chartMax !== chartMin
+    ? (chartMax - orderPrice) / (chartMax - chartMin)
+    : 0.5;
+  const markerTop = Math.max(6, Math.min(usableHeight, ratio * usableHeight));
+
+  return (
+    <button
+      key={order.id}
+      className={`rx-position-marker ${order.side === "buy" ? "buy" : "sell"}`}
+      style={{ top: `${markerTop}px`, zIndex: 8 + index }}
+      onClick={() => setOrdersSheet(true)}
+      aria-label={`Open position ${order.id}`}
+    >
+      <span>
+        {Number(order.quantity).toLocaleString(undefined, {
+          maximumFractionDigits: 8
+        })}
+      </span>
+
+      <b className={orderPnl >= 0 ? "profit" : "loss"}>
+        {orderPnl >= 0 ? "+" : "-"}
+        {formatMoney(Math.abs(orderPnl))}
+      </b>
+
+      <i
+        onClick={(e) => {
+          e.stopPropagation();
+          setCloseConfirmOrder(order);
+        }}
+        aria-label="Close trade"
+      >
+        <X size={14} />
+      </i>
+    </button>
+  );
+})}
       </section>
 
       {!chartFullscreen && <div className="rx-chart-controls">
@@ -1767,7 +1807,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     {chartFullscreen && <button className="rx-chart-fullscreen-exit" onClick={() => setChartFullscreen(false)} aria-label="Exit full chart"><ArrowLeft size={22} /></button>}
 
     {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)`, transition: tradeSheetDrag.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Estimated value</span><strong>{tradeQuote ? `${fmt(Number(amount))} lots · ${formatTradeValue(Number(tradeQuote.notional))} @ $${fmt(Number(tradeQuote.execution_price))}` : `${fmt(Number(amount))} lots · calculating…`}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade || !tradeQuote} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
-    {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
+    {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} initialTab={ordersSheetTab} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
     {selectedOrder && <OrderDetailSheet market={market} order={selectedOrder} livePrice={livePrice} onClose={() => setSelectedOrder(null)} onModify={modifyOrder} onCloseOrder={closeOrder} />}
     {closeConfirmOrder && <ClosePositionSheet order={closeConfirmOrder} livePrice={livePrice} onClose={() => setCloseConfirmOrder(null)} onConfirm={async (order) => { setCloseConfirmOrder(null); await closeOrder(order); }} />}
   </main>;
@@ -1792,7 +1832,7 @@ const detailStyles = `
 @media(max-width:430px){.rx-detail-price{font-size:35px}.rx-detail-scroll{padding-left:13px;padding-right:13px}.rx-detail-actions{padding-left:13px;padding-right:13px}}
 /* Space Coin detail-only refinements: keep the existing screen/layout intact. */
 
-.rx-chart-symbol{position:absolute;z-index:5;left:30px;top:8px;display:flex;align-items:center;gap:7px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}.rx-chart-symbol strong{display:flex;align-items:baseline;gap:1px}.rx-chart-symbol strong span{font-weight:500}.rx-chart-symbol-stack{width:30px;height:34px;position:relative;display:block;flex:0 0 30px}.rx-chart-symbol-stack img,.rx-chart-symbol-fallback{position:absolute;left:0;top:0;width:26px;height:26px;border-radius:50%;object-fit:cover;background:#f3f4f5;display:grid;place-items:center;font-size:12px;font-weight:800}.rx-chart-symbol-fallback{color:#b17e0b}.rx-chart-flag{position:absolute;left:9px;top:17px;width:18px;height:18px;border-radius:50%;background:#fff;display:grid;place-items:center;font-size:13px;line-height:1;box-shadow:0 0 0 1px #fff} .rx-real-chart-shell{position:relative;width:100%;height:100%;touch-action:pan-x pan-y}.rx-price-axis-gesture{position:absolute;right:0;top:0;bottom:0;width:42px;z-index:6;touch-action:none;background:transparent;cursor:ns-resize}
+.rx-chart-symbol{position:absolute;z-index:5;left:20px;top:8px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}.rx-chart-symbol strong{display:flex;align-items:baseline;gap:1px}.rx-chart-symbol strong span{font-weight:500}.rx-chart-symbol-stack{width:30px;height:34px;position:relative;display:block;flex:0 0 30px}.rx-chart-symbol-stack img,.rx-chart-symbol-fallback{position:absolute;left:0;top:0;width:25px;height:25px;border-radius:50%;object-fit:cover;background:#f3f4f5;display:grid;place-items:center;font-size:11px;font-weight:800}.rx-chart-symbol-fallback{color:#b17e0b}.rx-chart-flag{position:absolute;left:7px;top:16px;width:19px;height:19px;border-radius:50%;background:#fff;display:grid;place-items:center;font-size:12px;line-height:1;overflow:hidden;box-shadow:0 0 0 1px #fff}
 .rx-position-card{position:absolute;right:9px;top:10px;z-index:4;min-width:126px;border:0;border-radius:12px;padding:8px 10px;display:grid;grid-template-columns:auto 1fr;column-gap:7px;text-align:left;box-shadow:0 5px 18px rgba(17,20,24,.13);cursor:pointer}.rx-position-card span{font-size:9px;font-weight:800}.rx-position-card strong{font-size:9px}.rx-position-card b{grid-column:1/-1;margin-top:4px;font-size:13px}.rx-position-card.profit{background:#4bc98a;color:#fff}.rx-position-card.loss{background:#ef4b4b;color:#fff}
 .rx-detail-wallet{border:0;background:transparent;color:#111418;padding:0;cursor:pointer;text-align:left;position:relative}.rx-detail-wallet em{font-style:normal;position:absolute;right:-10px;top:-8px;min-width:16px;height:16px;border-radius:8px;padding:0 4px;background:#d7a21a;color:#fff;font-size:8px;display:grid;place-items:center}
 .rx-order-backdrop,.rx-trade-sheet-backdrop{touch-action:none;pointer-events:auto}.rx-order-backdrop{position:absolute;inset:0;z-index:45;background:rgba(17,20,24,.38);display:flex;align-items:flex-end}.rx-order-sheet,.rx-order-detail-sheet{width:100%;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.2);will-change:transform;touch-action:none;overflow:hidden;user-select:none;-webkit-user-select:none}.rx-order-sheet{height:72dvh}.rx-order-detail-sheet{height:82dvh;padding-bottom:calc(14px + env(safe-area-inset-bottom));overflow-y:auto;overflow-x:hidden;touch-action:none}.rx-sheet-drag-handle{width:42px;height:4px;border-radius:9px;background:#d8dadd;margin:10px auto 13px}.rx-order-tabs{height:55px;display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #e7e8ea}.rx-order-tabs button{border:0;border-bottom:3px solid transparent;background:#fff;color:#858a90;font:500 15px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-list{height:calc(100% - 69px);overflow:auto;-webkit-overflow-scrolling:touch}.rx-order-row{width:100%;min-height:76px;border:0;border-bottom:1px solid #edf0f2;background:#fff;display:grid;grid-template-columns:48px 1fr auto;gap:9px;align-items:center;text-align:left;padding:10px 18px;cursor:pointer}.rx-order-side{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;font-size:10px;font-weight:800}.rx-order-side.buy{background:#eaf8f1;color:#39a878}.rx-order-side.sell{background:#fdeceb;color:#d94c4c}.rx-order-row strong,.rx-order-row small{display:block}.rx-order-row strong{font-size:13px}.rx-order-row small{margin-top:4px;color:#858a90;font-size:9px}.rx-order-row b{font-size:11px;text-align:right}.profit{color:#39ad7a!important}.loss{color:#d94c4c!important}.rx-order-empty{min-height:52vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:25px;color:#747a80}.rx-order-empty strong{font-size:17px;color:#111418}.rx-order-empty span{margin-top:8px;max-width:260px;font-size:11px;line-height:1.45}.rx-order-detail-head{height:42px;display:flex;align-items:center;justify-content:space-between;padding:0 18px}.rx-order-detail-head strong{font-size:16px}.rx-order-detail-head button{border:0;background:transparent;color:#111418}.rx-order-detail-summary{display:flex;justify-content:space-between;align-items:center;padding:12px 18px 15px}.rx-order-detail-summary strong,.rx-order-detail-summary small{display:block}.rx-order-detail-summary strong{font-size:16px}.rx-order-detail-summary small{margin-top:5px;color:#7f858b;font-size:10px}.rx-order-detail-summary>b{font-size:15px}.rx-order-detail-tabs{display:grid;grid-template-columns:1fr 1fr 1fr;border-bottom:1px solid #e6e8ea;margin:0 18px}.rx-order-detail-tabs button{height:44px;border:0;background:#fff;color:#858a90;border-bottom:3px solid transparent;font:500 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-detail-tabs button.active{color:#111418;border-bottom-color:#111418}.rx-order-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:0;border-bottom:1px solid #edf0f2;margin:0 18px}.rx-order-detail-grid>div{padding:14px 0;border-bottom:1px solid #edf0f2}.rx-order-detail-grid>div:nth-child(odd){border-right:1px solid #edf0f2;padding-right:12px}.rx-order-detail-grid>div:nth-child(even){padding-left:12px}.rx-order-detail-grid small,.rx-order-detail-grid strong{display:block}.rx-order-detail-grid small{font-size:9px;color:#858a90}.rx-order-detail-grid strong{margin-top:5px;font-size:12px}.rx-order-setting{height:52px;margin:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #edf0f2;font-size:13px}.rx-switch{width:45px;height:26px;border:0;border-radius:14px;background:#d2d5d8;padding:3px;display:flex;align-items:center;justify-content:flex-start}.rx-switch i{display:block;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.16)}.rx-switch.on{background:#d7a21a;justify-content:flex-end}.rx-order-input{display:block;width:calc(100% - 36px);height:42px;margin:8px 18px;border:1px solid #e0e3e6;border-radius:11px;padding:0 11px;outline:0;font:600 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save,.rx-order-close{width:calc(100% - 36px);height:47px;margin:10px 18px 0;border:0;border-radius:13px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-order-save{background:#f4d35e;color:#111418}.rx-order-close{background:#f2f3f5;color:#111418}.rx-close-confirm{position:absolute;left:12px;right:12px;bottom:12px;z-index:4;background:#fff;border-radius:22px;padding:20px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 8px 35px rgba(17,20,24,.2);border:1px solid #eceeef}.rx-close-confirm h3{margin:0 0 16px;font-size:19px}.rx-close-confirm>div{display:flex;justify-content:space-between;padding:8px 0;color:#737980;font-size:12px}.rx-close-confirm>div b{color:#111418}.rx-close-confirm button{width:100%;height:46px;border:0;border-radius:12px;margin-top:8px;font:800 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-confirm button:first-of-type{background:#f4d35e;color:#111418}.rx-close-confirm button:last-of-type{background:#f1f2f4;color:#111418}
@@ -1809,13 +1849,13 @@ const detailStyles = `
 .rx-chart-one-click span{width:43px;height:28px;border-radius:16px;background:#d3d5d8;color:#fff;display:grid;place-items:center;font-size:15px}
 .rx-chart-tool{width:40px;height:40px;border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0}
 .rx-open-trades-card{height:40px;margin:0 0 8px;min-width:0;width:100%;box-sizing:border-box;border-radius:11px;background:#f7f8f8;display:flex;align-items:center;padding:0 8px 0 18px;gap:14px;overflow:hidden}
-.rx-open-trades-side{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.rx-open-trades-side{display:flex;align-items:center;gap:8px;white-space:nowrap;border:0;background:transparent;padding:0;color:inherit;font:inherit;cursor:pointer}
 .rx-open-trades-side span{font-size:14px;color:#20252a}
 .rx-open-trades-side b{min-width:25px;width:25px;height:25px;flex:0 0 25px;border-radius:50%;background:#eef0f2;color:#353a40;display:grid;place-items:center;font-size:12px;font-weight:600}
 .rx-open-trades-card>strong{margin-left:auto;min-width:0;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:500}
 .rx-open-trades-close{width:30px;height:30px;flex:0 0 30px;border:0;background:transparent;color:#df4d4d;display:grid;place-items:center;padding:0}
 .rx-open-trades-close:disabled{opacity:.45}
-.rx-detail-chart-wrap{height:calc(100dvh - 285px);min-height:390px;max-height:560px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
+.rx-detail-chart-wrap{height:455px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
 .rx-chart-symbol{position:absolute;z-index:5;left:30px;top:8px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}
 .rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:26px;min-width:0;max-width:calc(100% - 48px);border:0;padding:0;background:transparent;filter:drop-shadow(0 2px 6px rgba(17,20,24,.12));cursor:pointer}
 .rx-position-marker span{min-width:0;width:max-content;padding:0 8px;border-radius:7px 0 0 7px;display:grid;place-items:center;font:800 9px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
