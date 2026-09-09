@@ -1606,8 +1606,65 @@ function classifyNotification(notification) {
 }
 
 function PullToRefresh({ children }) {
-  // Pull-to-refresh is intentionally disabled globally. Refreshes are internal.
-  return children;
+  const [distance, setDistance] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const touch = useRef(null);
+  const threshold = 28;
+
+  const getScrollParent = (target) => {
+    let node = target;
+    while (node && node !== document.body) {
+      if (node instanceof HTMLElement) {
+        const style = window.getComputedStyle(node);
+        if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node;
+      }
+      node = node.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  };
+  const excluded = (target) => target?.closest?.("button, input, textarea, select, [contenteditable='true'], canvas, svg, video, a");
+  const onTouchStart = (event) => {
+    if (refreshing || excluded(event.target)) return;
+    const parent = getScrollParent(event.target);
+    if (parent.scrollTop <= 0) touch.current = { x: event.touches[0].clientX, y: event.touches[0].clientY, parent, vertical: false };
+  };
+  const onTouchMove = (event) => {
+    const active = touch.current;
+    if (!active || refreshing) return;
+    const dx = event.touches[0].clientX - active.x;
+    const dy = event.touches[0].clientY - active.y;
+    if (!active.vertical) {
+      if (dy <= 0 || Math.abs(dx) > Math.abs(dy) || dy < 2) {
+        if (dy < 0 || Math.abs(dx) > 10) touch.current = null;
+        return;
+      }
+      active.vertical = true;
+    }
+    if (active.parent.scrollTop > 0) { touch.current = null; setDistance(0); return; }
+    event.preventDefault();
+    setDistance(Math.min(88, dy * 0.9));
+  };
+  const onTouchEnd = () => {
+    const active = touch.current;
+    touch.current = null;
+    if (!active?.vertical) { setDistance(0); return; }
+    if (distance >= threshold && !sessionStorage.getItem("rainx-pull-refreshing")) {
+      sessionStorage.setItem("rainx-pull-refreshing", "1");
+      setRefreshing(true);
+      setDistance(threshold);
+      window.setTimeout(() => window.location.reload(), 220);
+    } else setDistance(0);
+  };
+  useEffect(() => { try { sessionStorage.removeItem("rainx-pull-refreshing"); } catch {} }, []);
+
+  return (
+    <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
+      <div className={`rx-pull-refresh-indicator${refreshing ? " is-refreshing" : ""}`} style={{ opacity: Math.min(1, distance / threshold), transform: `translate(-50%, ${Math.max(-52, distance - 58)}px) scale(${Math.min(1, 0.65 + distance / (threshold * 3))})`, transition: distance > 0 && !refreshing ? "none" : undefined }} aria-hidden="true">
+        <img src={rainxLogoTransparent} alt="" />
+      </div>
+      {children}
+    </div>
+  );
 }
 
 // Referral screens use their own portal, so the refresh affordance must live
@@ -2808,7 +2865,6 @@ function MainAppContent({ account, onLogout }) {
         .rx-slide-left  { animation: rx-slide-in-left  0.42s cubic-bezier(0.22,1,0.36,1) both; }
         .hide-scroll::-webkit-scrollbar { display:none; }
         .hide-scroll { -ms-overflow-style:none; scrollbar-width:none; }
-        .rx-standalone-route { overscroll-behavior-y: none; }
         .scroll-hint::after { content:''; position:absolute; bottom:0; left:0; right:0; height:2px; background:linear-gradient(90deg,transparent,rgba(244,211,94,0.5),transparent); opacity:0; transition:opacity 0.3s; pointer-events:none; }
         .scroll-hint.scrolling::after { opacity:1; }
       `}</style>
