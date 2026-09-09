@@ -85,7 +85,7 @@ self.addEventListener("install", (event) => { self.skipWaiting(); });
 
 // ── Activate ────────────────────────────────────────────────────────────────
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith("rainx-")).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith("rainx-")).map((key) => caches.delete(key)))));
 });
 
 // ── Fetch (network-only for app content) ────────────────────────────────────
