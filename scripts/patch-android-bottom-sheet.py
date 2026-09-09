@@ -12,6 +12,7 @@ if not ANDROID.exists():
 
 PLUGIN_TARGET.parent.mkdir(parents=True, exist_ok=True)
 plugin_text = PLUGIN_SOURCE.read_text(encoding="utf-8")
+plugin_text = plugin_text.replace("content.setMinimumHeight((int) (screenHeight * 0.94f));", "content.setMinimumHeight((int) (screenHeight * 0.90f));")
 PLUGIN_TARGET.write_text(plugin_text, encoding="utf-8")
 
 app_gradle = ANDROID / "app/build.gradle"
