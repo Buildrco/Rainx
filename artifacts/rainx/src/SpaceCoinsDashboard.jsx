@@ -1279,7 +1279,7 @@ function formatMoney(value, currency = "$") {
 function formatPrice(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return "0.00";
-  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   const precision = n.toPrecision(10);
   if (!/[eE]/.test(precision)) return precision.replace(/0+$/, "").replace(/\.$/, "");
   const exponent = Math.floor(Math.log10(n));
