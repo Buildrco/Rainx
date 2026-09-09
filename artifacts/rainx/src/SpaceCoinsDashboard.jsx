@@ -478,7 +478,7 @@ function CreateCoin({ onBack, onCreated }) {
       }
       const supply = Number(String(form.supply).replace(/,/g, ""));
       const totalSupply = supply > 0 ? supply : 1000000000;
-      const initialPrice = 0.000001;
+      const initialPrice = 0.01;
       const { data, error: insertError } = await supabase.from("space_coins").insert({ creator_id: user.id, name: form.name.trim(), symbol: form.symbol.trim().toUpperCase(), description: form.description.trim(), network: form.network, total_supply: totalSupply, initial_price: initialPrice, current_price: initialPrice, market_cap: totalSupply * initialPrice, volume_24h: 0, image_url, status: "live" }).select("*").single();
       if (insertError) {
         if (uploadedLogoPath) await supabase.storage.from("space-coin-logos").remove([uploadedLogoPath]);
@@ -580,13 +580,14 @@ function CreateCoin({ onBack, onCreated }) {
 
           {step === 1 && (
             <>
-              <div className="rx-upload" role="button" tabIndex={0} onClick={() => logoInputRef.current?.click()} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); logoInputRef.current?.click(); } }} aria-label="Upload Coin Logo">
+              <div className="rx-upload" role="button" tabIndex={0} onClick={(e) => { if (e.target === e.currentTarget) logoInputRef.current?.click(); }} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); logoInputRef.current?.click(); } }} aria-label="Upload Coin Logo">
                 <input
                   id="rx-coin-logo-input"
                   ref={logoInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
-                  onChange={(e) => {
+                  accept="image/*"
+                   onClick={(e) => e.stopPropagation()}
+                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     if (file && file.size > 5 * 1024 * 1024) {
                       setError("Image must be 5MB or smaller.");
@@ -1042,10 +1043,16 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
     } catch {}
 
     const since = new Date(Date.now() - RANGE_MS[range]).toISOString();
-    let { data: ticks, error } = await supabase.from("space_coin_ticks")
-      .select("price,open,high,low,close,created_at")
-      .eq("coin_id", coin.id).gte("created_at", since)
-      .order("created_at", { ascending: true }).limit(5000);
+    const [ticksResult, latestResult] = await Promise.all([
+      supabase.from("space_coin_ticks")
+        .select("price,open,high,low,close,created_at")
+        .eq("coin_id", coin.id).gte("created_at", since)
+        .order("created_at", { ascending: true }).limit(1000),
+      supabase.from("space_coins")
+        .select("current_price,initial_price,updated_at")
+        .eq("id", coin.id).maybeSingle(),
+    ]);
+    let { data: ticks, error } = ticksResult;
 
     // When there has been no recent activity, fall back to older stored history instead
     // of replacing the chart with an artificial series.
@@ -1053,15 +1060,13 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
       const older = await supabase.from("space_coin_ticks")
         .select("price,open,high,low,close,created_at")
         .eq("coin_id", coin.id)
-        .order("created_at", { ascending: false }).limit(5000);
+        .order("created_at", { ascending: false }).limit(1000);
       ticks = older.data || [];
       if (Array.isArray(ticks)) ticks.reverse();
       error = older.error || null;
     }
 
-    const { data: latestCoin } = await supabase.from("space_coins")
-      .select("current_price,initial_price,updated_at")
-      .eq("id", coin.id).maybeSingle();
+    const { data: latestCoin } = latestResult;
     if (error) console.warn("[SpaceCoins] tick load failed", error);
     const fallback = Number(latestCoin?.current_price || coin.current_price || coin.initial_price || 0.000001);
     const bars = aggregate(ticks, fallback);
@@ -1380,7 +1385,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const notional = Number(result?.notional || tokenQuantity * price);
       const { data: latestAccount } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).single();
       const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(100);
-       setAccount(latestAccount || (account ? { ...account, cash_balance: result?.cash_balance ?? account.cash_balance } : account));
+       setAccount(latestAccount
+         ? { ...latestAccount, cash_balance: result?.cash_balance ?? latestAccount.cash_balance, token_balances: result?.token_balances ?? latestAccount.token_balances }
+         : (account ? { ...account, cash_balance: result?.cash_balance ?? account.cash_balance, token_balances: result?.token_balances ?? account.token_balances } : account));
       setLivePrice(effectivePrice);
       setTrades(latestTrades || trades);
        setNotice(`${tradeSheet === "buy" ? "Buy" : "Sell"} order opened: ${fmt(quantity)} lots @ $${fmt(price)} · ${formatMoney(notional)}`);
@@ -2099,8 +2106,12 @@ export default function SpaceCoinsDashboard({ onBack }) {
     const load = async () => {
       const { data } = await supabase.from("space_coins").select("*").eq("status", "live").order("created_at", { ascending: false });
       if (!active) return;
+      // Render the registry as soon as it arrives; activity is ranking metadata, not a blocker.
+      setCoins(data || []);
+      setCoinsLoaded(true);
       const ids = (data || []).map((coin) => coin.id).filter(Boolean);
-      const { data: activity } = ids.length ? await supabase.from("space_coin_trades").select("coin_id,side,quantity,price,close_price,status").in("coin_id", ids).limit(10000) : { data: [] };
+      const { data: activity } = ids.length ? await supabase.from("space_coin_trades").select("coin_id,side,quantity,price,close_price,status").in("coin_id", ids).limit(2000) : { data: [] };
+      if (!active) return;
       const stats = {};
       (activity || []).forEach((trade) => {
         const key = trade.coin_id;
@@ -2112,8 +2123,6 @@ export default function SpaceCoinsDashboard({ onBack }) {
         }
       });
       setCoinActivity(stats);
-      setCoins(data || []);
-      setCoinsLoaded(true);
     };
     load();
     const channel = supabase.channel("space-coins-registry").on("postgres_changes", { event: "*", schema: "public", table: "space_coins" }, load).subscribe();
