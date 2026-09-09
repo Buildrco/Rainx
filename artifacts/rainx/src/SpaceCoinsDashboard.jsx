@@ -1815,18 +1815,18 @@ const detailStyles = `
 .rx-open-trades-card>strong{margin-left:auto;min-width:0;flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:500}
 .rx-open-trades-close{width:30px;height:30px;flex:0 0 30px;border:0;background:transparent;color:#df4d4d;display:grid;place-items:center;padding:0}
 .rx-open-trades-close:disabled{opacity:.45}
-.rx-detail-chart-wrap{height:455px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
+.rx-detail-chart-wrap{height:calc(100dvh - 285px);min-height:390px;max-height:560px;position:relative;width:100%;max-width:100%;min-width:0;margin:0;overflow:hidden}
 .rx-chart-symbol{position:absolute;z-index:5;left:30px;top:8px;display:flex;align-items:center;gap:5px;font-size:16px;font-weight:700;color:#20252a;pointer-events:none}
-.rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:30px;min-width:0;max-width:calc(100% - 55px);border:0;padding:0;background:transparent;filter:drop-shadow(0 3px 8px rgba(17,20,24,.12));cursor:pointer}
-.rx-position-marker span{min-width:0;width:max-content;padding:0 11px;border-radius:8px 0 0 8px;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
-.rx-position-marker b{min-width:0;width:max-content;padding:0 11px;border:1.5px solid currentColor;border-left:0;border-radius:0;background:#fff;display:grid;place-items:center;font:800 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap}
-.rx-position-marker i{width:34px;height:30px;border:1.5px solid #d9dcdf;border-left:0;border-radius:0 8px 8px 0;background:#fff;color:#3f464d;display:grid;place-items:center}
+.rx-position-marker{position:absolute;left:0;right:auto;z-index:8;display:flex;align-items:stretch;height:26px;min-width:0;max-width:calc(100% - 48px);border:0;padding:0;background:transparent;filter:drop-shadow(0 2px 6px rgba(17,20,24,.12));cursor:pointer}
+.rx-position-marker span{min-width:0;width:max-content;padding:0 8px;border-radius:7px 0 0 7px;display:grid;place-items:center;font:800 9px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap;color:#111418}
+.rx-position-marker b{min-width:0;width:max-content;padding:0 8px;border:1.5px solid currentColor;border-left:0;border-radius:0;background:#fff;display:grid;place-items:center;font:800 9px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;white-space:nowrap}
+.rx-position-marker i{width:29px;height:26px;border:1.5px solid currentColor;border-left:0;border-radius:0 7px 7px 0;background:#fff;color:#3f464d;display:grid;place-items:center}
 .rx-position-marker.buy span{background:#f4d35e}.rx-position-marker.sell span{background:#111418;color:#fff}
-.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
-.rx-chart-controls{display:flex;align-items:center;gap:9px;margin:5px 0 9px}
+.rx-position-marker.buy b,.rx-position-marker.buy i{border-color:#F4D35E}.rx-position-marker.sell b,.rx-position-marker.sell i{border-color:#111418}.rx-position-marker .profit{color:#39ad7a!important}.rx-position-marker .loss{color:#d94c4c!important}
+.rx-chart-controls{position:absolute;z-index:12;left:13px;bottom:76px;display:flex;align-items:center;gap:7px;margin:0}
 .rx-chart-control-wrap{position:relative}
-.rx-chart-control{height:44px;min-width:64px;width:auto;padding:0 12px;border:0;border-radius:10px;background:#f3f4f5;color:#22272c;display:flex;align-items:center;justify-content:center;gap:7px;font:600 12px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
-.rx-chart-type-control{min-width:52px;width:52px;padding:0}.rx-chart-fx{min-width:44px;width:44px;font-size:17px;font-weight:500}
+.rx-chart-control{height:40px;min-width:57px;width:auto;padding:0 9px;border:0;border-radius:9px;background:#f3f4f5;color:#22272c;display:flex;align-items:center;justify-content:center;gap:5px;font:600 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;box-sizing:border-box;flex:0 0 auto}
+.rx-chart-type-control{min-width:46px;width:46px;height:40px;padding:0}.rx-chart-fx{min-width:42px;width:42px;height:40px;font-size:16px;font-weight:500;padding:0}
 .rx-chart-popover{position:absolute;z-index:30;left:0;bottom:49px;min-width:105px;padding:6px;border:1px solid #e5e7e9;border-radius:12px;background:#fff;box-shadow:0 8px 28px rgba(17,20,24,.14)}
 .rx-chart-popover button{width:100%;height:34px;border:0;border-radius:8px;background:#fff;color:#4e555c;text-align:left;padding:0 10px;font:600 11px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
 .rx-chart-popover button.active{background:#f2f4f6;color:#111418}
