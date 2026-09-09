@@ -751,18 +751,14 @@ svg path[fill="#F4D35E"] {
   display: block;
   overflow-y: auto;
   overflow-x: hidden;
-  overscroll-behavior: none;
   background: #0F0E0B;
   isolation: isolate;
   transform: translateZ(0);
   backface-visibility: hidden;
 }
-.rx-standalone-route > * {
-  overscroll-behavior-y: contain;
-}
+.rx-standalone-route > * {}
 .sc-screen,
 .rx-native-screen {
-  overscroll-behavior: none;
   transform: translateZ(0);
   backface-visibility: hidden;
 }
@@ -770,7 +766,6 @@ svg path[fill="#F4D35E"] {
 .rx-menu-content,
 .sc-screen {
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior-y: contain;
 }
 
 @keyframes rx-overlay-in { from { opacity: 0; } to { opacity: 1; } }
