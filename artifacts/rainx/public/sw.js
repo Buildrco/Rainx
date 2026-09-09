@@ -1,7 +1,7 @@
 /* RainX Service Worker — Push Notifications + Offline Cache */
 // Keep this unique for deploys, but update adoption is also enforced by
 // index.html with updateViaCache: "none" and an explicit registration.update().
-const CACHE_NAME = "rainx-v2026-09-07-shell-stability-1";
+const CACHE_NAME = "rainx-no-app-shell-cache-2026-09-09-1";
 const STATIC_ASSETS = ["/", "/index.html", "/manifest.json", "/goodbye-lolo.webm"];
 const presenceByClient = new Map();
 const recentPushIds = new Set();
@@ -81,70 +81,19 @@ self.addEventListener("message", (event) => {
 });
 
 // ── Install ────────────────────────────────────────────────────────────────
-self.addEventListener("install", (event) => {
-  self.skipWaiting();
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS).catch(() => {}))
-  );
-});
+self.addEventListener("install", (event) => { self.skipWaiting(); });
 
-// ── Activate ───────────────────────────────────────────────────────────────
+// ── Activate ────────────────────────────────────────────────────────────────
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys
-          .filter((k) => k.startsWith("rainx-") && k !== CACHE_NAME)
-          .map((k) => caches.delete(k))
-      )
-    ).then(() => self.clients.claim())
-      .then(() => self.clients.matchAll({ type: "window", includeUncontrolled: true }))
-      .then((clients) =>
-        Promise.all(
-          clients.map((client) =>
-            "navigate" in client
-              ? client.navigate(client.url).catch(() => null)
-              : null
-          )
-        )
-      )
-  );
+  event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key.startsWith("rainx-")).map((key) => caches.delete(key)))).then(() => self.clients.claim()));
 });
 
-// ── Fetch (network-first; navigation explicitly bypasses browser HTTP cache) ──
+// ── Fetch (network-only for app content) ────────────────────────────────────
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (url.pathname.startsWith("/api/")) return; // never cache API calls
-
-  // The app shell must always pick up a newly deployed Vite index/chunk graph.
-  // This is especially important for installed PWAs, where an older index can
-  // otherwise keep pointing at the previous production bundle after a deploy.
-  if (event.request.mode === "navigate") {
-    event.respondWith(
-      fetch(new Request(event.request, { cache: "no-store" }))
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          }
-          return response;
-        })
-        .catch(() => caches.match(event.request))
-    );
-    return;
-  }
-
-  event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        if (response.ok) {
-          const copy = response.clone();
-          void caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-        }
-        return response;
-      })
-      .catch(() => caches.match(event.request))
-  );
+  if (url.pathname.startsWith("/api/")) return;
+  const request = event.request.method === "GET" ? new Request(event.request, { cache: "no-store" }) : event.request;
+  event.respondWith(fetch(request));
 });
 
 // ── Category → sound file mapping ─────────────────────────────────────────
