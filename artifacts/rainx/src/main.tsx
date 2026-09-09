@@ -8,17 +8,6 @@ import './index.css';
 
 createRoot(document.getElementById('root')!).render(<App />);
 
-// Offline app-shell caching is intentionally registered after the app mounts.
-if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    void navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
-      .then((registration) => registration.update())
-      .catch((error) => {
-        console.warn('[RainX] offline shell unavailable', error);
-      });
-  }, { once: true });
-}
-
 // Native OTA updates are initialized after React mounts. On the web this is a no-op.
 void initLiveUpdates().catch((error) => {
   console.warn('[RainX] live update bridge unavailable', error);
