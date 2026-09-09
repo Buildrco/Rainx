@@ -56,6 +56,9 @@ const REAL_CLOUD_VIDEO =
   "https://d8j0ntlcm91z4.cloudfront.net/user_3BHloZy6zhOMmqbVkiDF/hf_20260821_153425_e7dbe97e-35f8-4ada-80e3-d11209f83006.mp4";
 
 const COINS = [];
+// Space Coin order quantities are token quantities. The product calls these
+// "lots", so keep the mapping explicit and shared with the RPC contract.
+const SPACE_COIN_TOKENS_PER_LOT = 1;
 
 
 function stop(e) {
@@ -161,7 +164,7 @@ function Shortcuts({ onMyCoins }) {
   );
 }
 
-function CoinList({ coins = COINS, onSelect }) {
+function CoinList({ coins = COINS, onSelect, loaded = false }) {
   return (
     <section className="rx-space-section">
       <div className="rx-section-head">
@@ -182,7 +185,7 @@ function CoinList({ coins = COINS, onSelect }) {
               <small>{coin.change || (Number.isFinite(Number(coin.price_change_24h)) ? (Number(coin.price_change_24h) >= 0 ? "+" : "") + Number(coin.price_change_24h).toFixed(2) + "%" : "—")}</small>
             </span>
           </button>
-        )) : <div className="rx-empty-coin-list">No Space Coins yet. Create one to see it here.</div>}
+        )) : loaded ? <div className="rx-empty-coin-list">No Space Coins yet. Create one to see it here.</div> : <div className="rx-empty-coin-list">Loading Space Coins…</div>}
       </div>
     </section>
   );
@@ -232,7 +235,7 @@ function ExternalPanel({ onConnect }) {
   );
 }
 
-function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange, coins, coinActivity = {}, onSelectCoin }) {
+function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeStateChange, coins, coinsLoaded, coinActivity = {}, onSelectCoin }) {
   const viewportRef = useRef(null);
   const start = useRef(null);
   const dragProgressRef = useRef(0);
@@ -302,7 +305,7 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
       >
         <div className="rx-swipe-panel">
           <Shortcuts onMyCoins={onMyCoins} />
-          <CoinList coins={[...coins].sort((a,b) => { const A=coinActivity[a.id]||{}; const B=coinActivity[b.id]||{}; return (Number(B.trades||0)-Number(A.trades||0)) || (Number(B.realizedPnl||0)-Number(A.realizedPnl||0)); })} onSelect={onSelectCoin} />
+          <CoinList coins={[...coins].sort((a,b) => { const A=coinActivity[a.id]||{}; const B=coinActivity[b.id]||{}; return (Number(B.trades||0)-Number(A.trades||0)) || (Number(B.realizedPnl||0)-Number(A.realizedPnl||0)); })} onSelect={onSelectCoin} loaded={coinsLoaded} />
           <Trending coins={[...coins].sort((a,b) => { const A=coinActivity[a.id]||{}; const B=coinActivity[b.id]||{}; return (Number(B.trades||0)-Number(A.trades||0)) || (Number(B.realizedPnl||0)-Number(A.realizedPnl||0)); })} />
         </div>
 
@@ -314,7 +317,7 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
   );
 }
 
-function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, coinActivity = {}, onSelectCoin }) {
+function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, coinsLoaded, coinActivity = {}, onSelectCoin }) {
   const [swipeProgress, setSwipeProgress] = useState(0);
   const [swiping, setSwiping] = useState(false);
 
@@ -332,6 +335,7 @@ function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coin
             mode={mode}
             setMode={setMode}
             coins={coins}
+            coinsLoaded={coinsLoaded}
             coinActivity={coinActivity}
             onSelectCoin={onSelectCoin}
             onMyCoins={onMyCoins}
@@ -473,7 +477,9 @@ function CreateCoin({ onBack, onCreated }) {
         image_url = supabase.storage.from("space-coin-logos").getPublicUrl(uploadedLogoPath).data.publicUrl;
       }
       const supply = Number(String(form.supply).replace(/,/g, ""));
-      const { data, error: insertError } = await supabase.from("space_coins").insert({ creator_id: user.id, name: form.name.trim(), symbol: form.symbol.trim().toUpperCase(), description: form.description.trim(), network: form.network, total_supply: supply > 0 ? supply : 1000000000, initial_price: 0.000001, current_price: 0.000001, image_url, status: "live" }).select("*").single();
+      const totalSupply = supply > 0 ? supply : 1000000000;
+      const initialPrice = 0.000001;
+      const { data, error: insertError } = await supabase.from("space_coins").insert({ creator_id: user.id, name: form.name.trim(), symbol: form.symbol.trim().toUpperCase(), description: form.description.trim(), network: form.network, total_supply: totalSupply, initial_price: initialPrice, current_price: initialPrice, market_cap: totalSupply * initialPrice, volume_24h: 0, image_url, status: "live" }).select("*").single();
       if (insertError) {
         if (uploadedLogoPath) await supabase.storage.from("space-coin-logos").remove([uploadedLogoPath]);
         throw insertError;
@@ -1012,11 +1018,7 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
     // No historical ticks: keep the chart present without fabricating movement.
     const t = Math.floor(new Date(coin?.created_at || Date.now()).getTime() / 1000);
     const anchor = Math.floor(t / bucketSeconds) * bucketSeconds;
-    const count = 3;
-    return Array.from({ length: count }, (_, index) => ({
-      time: anchor - ((count - 1 - index) * bucketSeconds),
-      open: fallback, high: fallback, low: fallback, close: fallback,
-    }));
+    return [{ time: anchor, open: fallback, high: fallback, low: fallback, close: fallback }];
   }, [bucketSeconds, coin?.created_at]);
 
   const publish = useCallback((price, data) => {
@@ -1370,17 +1372,18 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.id) throw new Error("Sign in to trade.");
       const accountKey = "real:" + user.id;
-      const { data: result, error } = await supabase.rpc("execute_space_coin_trade", { p_account_key: accountKey, p_mode: "real", p_coin_id: market.id, p_side: tradeSheet, p_quantity: quantity });
+      const tokenQuantity = quantity * SPACE_COIN_TOKENS_PER_LOT;
+      const { data: result, error } = await supabase.rpc("execute_space_coin_trade", { p_account_key: accountKey, p_mode: "real", p_coin_id: market.id, p_side: tradeSheet, p_quantity: tokenQuantity });
       if (error) throw error;
       const price = Number(result?.price || livePrice);
       const effectivePrice = Number(result?.market_price || result?.current_price || price);
-      const notional = Number(result?.notional || quantity * price);
+      const notional = Number(result?.notional || tokenQuantity * price);
       const { data: latestAccount } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).single();
       const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(100);
-      setAccount(latestAccount || account);
+       setAccount(latestAccount || (account ? { ...account, cash_balance: result?.cash_balance ?? account.cash_balance } : account));
       setLivePrice(effectivePrice);
       setTrades(latestTrades || trades);
-      setNotice(`${tradeSheet === "buy" ? "Buy" : "Sell"} order opened: ${fmt(quantity)} lots @ $${fmt(price)} · ${formatMoney(notional)}`);
+       setNotice(`${tradeSheet === "buy" ? "Buy" : "Sell"} order opened: ${fmt(quantity)} lots @ $${fmt(price)} · ${formatMoney(notional)}`);
       setAmount(""); setTradeSheet(null);
     } catch (error) { setNotice(error?.message || "Trade failed."); }
     finally { setLoadingTrade(false); }
@@ -1402,10 +1405,11 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const { data, error } = await supabase.rpc("close_space_coin_trade", { p_trade_id: order.id, p_close_price: price });
       if (error) throw error;
       const latestAccount = await supabase.from("space_coin_accounts").select("*").eq("id", account.id).single();
-      setAccount(latestAccount.data || account);
-      setTrades((old) => old.map((row) => row.id === order.id ? (data?.trade || { ...row, status: "closed", close_price: price, closed_at: new Date().toISOString() }) : row));
+      setAccount(latestAccount.data || (account ? { ...account, cash_balance: data?.cash_balance ?? account.cash_balance } : account));
+      const closePrice = Number(data?.closing_price || data?.execution_price || price);
+      setTrades((old) => old.map((row) => row.id === order.id ? (data?.trade || { ...row, status: "closed", close_price: closePrice, closed_at: new Date().toISOString() }) : row));
       setSelectedOrder(null); setOrdersSheet(false);
-      const pnl = Number(data?.pnl ?? selectedPnl({ ...order, close_price: price }));
+      const pnl = Number(data?.pnl ?? selectedPnl({ ...order, close_price: closePrice }));
       setNotice(`Order closed. ${pnl >= 0 ? "Profit" : "Loss"}: ${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}. Balance updated.`);
     } catch (error) { setNotice(error?.message || "Unable to close order."); }
   };
@@ -2166,6 +2170,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
         onMyCoins={() => setOverlay("coins")}
         onConnect={() => setOverlay("wallet")}
         coins={coins}
+        coinsLoaded={coinsLoaded}
         coinActivity={coinActivity}
         onSelectCoin={(coin) => { setSelectedCoin(coin); setScreen("creator"); }}
       />
