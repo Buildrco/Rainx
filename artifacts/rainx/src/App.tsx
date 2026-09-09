@@ -105,8 +105,6 @@ const APP_SURFACE = {
   background: "#F8F9FA",
   isolation: "isolate",
   overflowY: "hidden",
-  overscrollBehavior: "none",
-  touchAction: "pan-y",
 } as const;
 
 function installGlobalTouchFeedback() {

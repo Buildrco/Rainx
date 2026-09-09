@@ -2793,7 +2793,7 @@ function MainAppContent({ account, onLogout }) {
 
   return (
     <PullToRefresh>
-      <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", overscrollBehaviorY: "none", touchAction: "pan-y", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
+      <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
         * { box-sizing: border-box; }
@@ -2808,8 +2808,6 @@ function MainAppContent({ account, onLogout }) {
         .rx-slide-left  { animation: rx-slide-in-left  0.42s cubic-bezier(0.22,1,0.36,1) both; }
         .hide-scroll::-webkit-scrollbar { display:none; }
         .hide-scroll { -ms-overflow-style:none; scrollbar-width:none; }
-        /* Disable native rubber-band/pull-to-refresh globally; internal refresh buttons remain available. */
-        .rx-app-root { overscroll-behavior-y: none; }
         .rx-standalone-route { overscroll-behavior-y: none; }
         .scroll-hint::after { content:''; position:absolute; bottom:0; left:0; right:0; height:2px; background:linear-gradient(90deg,transparent,rgba(244,211,94,0.5),transparent); opacity:0; transition:opacity 0.3s; pointer-events:none; }
         .scroll-hint.scrolling::after { opacity:1; }

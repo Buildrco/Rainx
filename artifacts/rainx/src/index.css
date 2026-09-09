@@ -777,9 +777,6 @@ svg path[fill="#F4D35E"] {
 @keyframes rx-modal-spring { 0% { opacity: 0; transform: translateY(34px) scale(.82); } 62% { opacity: 1; transform: translateY(-4px) scale(1.02); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes rx-card-shake { from { transform: rotate(-1.2deg) translateY(-1px); } to { transform: rotate(1.2deg) translateY(1px); } }
 
-/* App-wide contract: screens stay opaque during transitions and never invoke native pull-to-refresh. */
-html, body, #root { overscroll-behavior-y: none; }
-.rx-app-root, .rx-referral-screen, .rx-native-screen { overscroll-behavior: none; }
 
 
 /* Native screen contract: opaque layers prevent the previous route flashing through. */
