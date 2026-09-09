@@ -574,12 +574,12 @@ function CreateCoin({ onBack, onCreated }) {
 
           {step === 1 && (
             <>
-              <label className="rx-upload" htmlFor="rx-coin-logo-input">
+              <div className="rx-upload" role="button" tabIndex={0} onClick={() => logoInputRef.current?.click()} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); logoInputRef.current?.click(); } }} aria-label="Upload Coin Logo">
                 <input
                   id="rx-coin-logo-input"
                   ref={logoInputRef}
                   type="file"
-                  accept="image/png,image/jpeg,image/webp"
+                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     if (file && file.size > 5 * 1024 * 1024) {
@@ -602,7 +602,7 @@ function CreateCoin({ onBack, onCreated }) {
 
                 <strong>Upload Coin Logo</strong>
                 <small>PNG, JPG or WEBP · Max 5MB</small>
-              </label>
+              </div>
 
               <div className="rx-fields">
                 <Field
@@ -1009,23 +1009,14 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
     });
     const bars = [...map.values()].sort((a, b) => a.time - b.time);
     if (bars.length) return bars;
+    // No historical ticks: keep the chart present without fabricating movement.
     const t = Math.floor(new Date(coin?.created_at || Date.now()).getTime() / 1000);
     const anchor = Math.floor(t / bucketSeconds) * bucketSeconds;
-    const count = range === "24h" ? 72 : range === "7d" ? 84 : range === "1m" ? 96 : 108;
-    const seed = Math.abs(String(coin?.id || coin?.symbol || "space").split("").reduce((a, ch) => ((a * 31) + ch.charCodeAt(0)) % 100000, 7));
-    const generated = [];
-    let previous = fallback;
-    for (let i = count - 1; i >= 0; i -= 1) {
-      const phase = (i + seed) * 0.47;
-      const drift = Math.sin(phase) * 0.0018 + Math.sin(phase * 0.31) * 0.0009;
-      const close = Math.max(fallback * 0.985, previous * (1 + drift));
-      const open = previous;
-      const high = Math.max(open, close) * (1 + 0.0007);
-      const low = Math.min(open, close) * (1 - 0.0007);
-      generated.push({ time: anchor - (i * bucketSeconds), open, high, low, close });
-      previous = close;
-    }
-    return generated.sort((a, b) => a.time - b.time);
+    const count = 3;
+    return Array.from({ length: count }, (_, index) => ({
+      time: anchor - ((count - 1 - index) * bucketSeconds),
+      open: fallback, high: fallback, low: fallback, close: fallback,
+    }));
   }, [bucketSeconds, coin?.created_at]);
 
   const publish = useCallback((price, data) => {
@@ -1036,14 +1027,39 @@ function CoinPriceChart({ coin, range, chartType, onPriceChange, onPriceCoordina
 
   const load = useCallback(async () => {
     if (!coin?.id || !seriesRef.current) return;
+
+    // Paint immediately from the last known coin price so the chart never sits blank
+    // while Supabase is loading. This is a real-value placeholder, not fabricated movement.
+    const immediateFallback = Number(coin.current_price || coin.initial_price || 0.000001);
+    const immediateBars = aggregate([], immediateFallback);
+    try {
+      if (chartType === "line") seriesRef.current.setData(immediateBars.map((b) => ({ time: b.time, value: b.close })));
+      else seriesRef.current.setData(immediateBars);
+      chartRef.current?.timeScale().fitContent();
+      publish(immediateFallback, immediateBars.map((b) => ({ time: b.time, value: b.close })));
+    } catch {}
+
     const since = new Date(Date.now() - RANGE_MS[range]).toISOString();
-    const [{ data: ticks, error }, { data: latestCoin }] = await Promise.all([
-      supabase.from("space_coin_ticks")
+    let { data: ticks, error } = await supabase.from("space_coin_ticks")
+      .select("price,open,high,low,close,created_at")
+      .eq("coin_id", coin.id).gte("created_at", since)
+      .order("created_at", { ascending: true }).limit(5000);
+
+    // When there has been no recent activity, fall back to older stored history instead
+    // of replacing the chart with an artificial series.
+    if (!error && (!ticks || ticks.length === 0)) {
+      const older = await supabase.from("space_coin_ticks")
         .select("price,open,high,low,close,created_at")
-        .eq("coin_id", coin.id).gte("created_at", since)
-        .order("created_at", { ascending: true }).limit(5000),
-      supabase.from("space_coins").select("current_price,initial_price,updated_at").eq("id", coin.id).maybeSingle(),
-    ]);
+        .eq("coin_id", coin.id)
+        .order("created_at", { ascending: false }).limit(5000);
+      ticks = older.data || [];
+      if (Array.isArray(ticks)) ticks.reverse();
+      error = older.error || null;
+    }
+
+    const { data: latestCoin } = await supabase.from("space_coins")
+      .select("current_price,initial_price,updated_at")
+      .eq("id", coin.id).maybeSingle();
     if (error) console.warn("[SpaceCoins] tick load failed", error);
     const fallback = Number(latestCoin?.current_price || coin.current_price || coin.initial_price || 0.000001);
     const bars = aggregate(ticks, fallback);
@@ -1332,7 +1348,8 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const fmt = (value) => {
     const n = Number(value || 0);
     if (!Number.isFinite(n)) return "0";
-    return n < 0.001 ? n.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (Math.abs(n) < 0.001) return n.toPrecision(10).replace(/0+$/, "").replace(/\.$/, "");
+    return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
   };
   const pct = Number(market?.price_change_24h || 0);
   const initial = Number(market?.initial_price || market?.current_price || livePrice || 0.000001);
@@ -1356,10 +1373,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const { data: result, error } = await supabase.rpc("execute_space_coin_trade", { p_account_key: accountKey, p_mode: "real", p_coin_id: market.id, p_side: tradeSheet, p_quantity: quantity });
       if (error) throw error;
       const price = Number(result?.price || livePrice);
-      const impact = Math.min(0.01, Math.max(0.0005, Math.log10(quantity + 1) * 0.0007));
-      const impactedPrice = Math.max(price * 0.5, price * (tradeSheet === "buy" ? (1 + impact) : (1 - impact)));
-      const { data: tickData } = await supabase.rpc("record_space_coin_tick", { p_coin_id: market.id, p_price: impactedPrice });
-      const effectivePrice = Number(tickData?.price || impactedPrice);
+      const effectivePrice = Number(result?.market_price || result?.current_price || price);
       const notional = Number(result?.notional || quantity * price);
       const { data: latestAccount } = await supabase.from("space_coin_accounts").select("*").eq("account_key", accountKey).single();
       const { data: latestTrades } = await supabase.from("space_coin_trades").select("id,side,quantity,price,notional,created_at,status,close_price,closed_at,stop_loss,take_profit").eq("coin_id", market.id).eq("user_id", user.id).order("created_at", { ascending: false }).limit(100);
@@ -1396,25 +1410,26 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     } catch (error) { setNotice(error?.message || "Unable to close order."); }
   };
 
-  // Keep the internal Space Coin market alive while this trading screen is open.
-  // Every tick is persisted to Supabase, so the chart, price and floating P/L all move together.
+  // Read the shared market price. Server-side trade execution is the only price writer.
   useEffect(() => {
     if (!market?.id) return undefined;
     let active = true;
-    let lastPrice = Number(market.current_price || market.initial_price || 0.000001);
-    const tick = async () => {
-      if (!active || !Number.isFinite(lastPrice) || lastPrice <= 0) return;
-      const wave = Math.sin(Date.now() / 4700) * 0.0008 + Math.sin(Date.now() / 11700) * 0.00045;
-      const nextPrice = Math.max(lastPrice * 0.995, lastPrice * (1 + wave));
-      const { data, error } = await supabase.rpc("record_space_coin_tick", { p_coin_id: market.id, p_price: nextPrice });
-      if (!error && data?.price) {
-        lastPrice = Number(data.price);
-        if (active) setLivePrice(lastPrice);
-      }
+    const refreshMarketPrice = async () => {
+      const { data } = await supabase.from("space_coins")
+        .select("current_price,initial_price,updated_at")
+        .eq("id", market.id).maybeSingle();
+      if (!active || !data) return;
+      const next = Number(data.current_price || data.initial_price || 0.000001);
+      if (Number.isFinite(next) && next > 0) setLivePrice(next);
     };
-    tick();
-    const timer = window.setInterval(tick, 2500);
-    return () => { active = false; window.clearInterval(timer); };
+    refreshMarketPrice();
+    const timer = window.setInterval(refreshMarketPrice, 3000);
+    const channel = supabase.channel("space-coin-market-" + market.id)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "space_coins", filter: "id=eq." + market.id }, (payload) => {
+        const next = Number(payload.new?.current_price);
+        if (Number.isFinite(next) && next > 0) setLivePrice(next);
+      }).subscribe();
+    return () => { active = false; window.clearInterval(timer); supabase.removeChannel(channel); };
   }, [market?.id]);
 
   useEffect(() => {
@@ -2047,6 +2062,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
   const [coins, setCoins] = useState(COINS);
   const [coinActivity, setCoinActivity] = useState({});
   const [selectedCoin, setSelectedCoin] = useState(null);
+  const [coinsLoaded, setCoinsLoaded] = useState(false);
 
   const handleNativeBack = useCallback(() => {
     if (overlay) {
@@ -2093,6 +2109,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
       });
       setCoinActivity(stats);
       setCoins(data || []);
+      setCoinsLoaded(true);
     };
     load();
     const channel = supabase.channel("space-coins-registry").on("postgres_changes", { event: "*", schema: "public", table: "space_coins" }, load).subscribe();
@@ -2110,7 +2127,11 @@ export default function SpaceCoinsDashboard({ onBack }) {
     return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("creator")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
   }
   if (screen === "creator") {
-    return <CreatorDashboard coin={selectedCoin || coins[0]} onBack={() => setScreen("dashboard")} onManage={() => setScreen("liquidity-manage")} />;
+    const activeCoin = selectedCoin || coins[0] || null;
+    if (!activeCoin && !coinsLoaded) {
+      return <main className="rx-native-screen"><style>{styles + createStyles + detailStyles}</style><NativeHeader title="Space Coin" onBack={() => setScreen("dashboard")} /><div className="rx-native-scroll"><div className="rx-empty-coins"><strong>Loading Space Coin…</strong><span>Syncing your live Space Coin market.</span></div></div></main>;
+    }
+    return <CreatorDashboard coin={activeCoin} onBack={() => setScreen("dashboard")} onManage={() => setScreen("liquidity-manage")} />;
   }
   if (screen === "liquidity-manage") {
     return <LiquidityScreen onBack={() => setScreen("creator")} onToggle={() => {}} />;
