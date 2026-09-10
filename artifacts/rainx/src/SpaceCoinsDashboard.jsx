@@ -1313,35 +1313,43 @@ function useSheetDrag(open, onClose, initial = 0.94) {
     frame.current = requestAnimationFrame(() => setProgress(next));
   };
 
-  const onPointerDown = (e) => {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    start.current = { y: e.clientY, x: e.clientX, progress: progressRef.current, pointerId: e.pointerId };
-    e.currentTarget.setPointerCapture?.(e.pointerId);
+  const onTouchStart = (e) => {
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    start.current = { y: touch.clientY, x: touch.clientX, progress: progressRef.current };
     setDragging(true);
   };
 
-  const onPointerMove = (e) => {
-    if (!start.current) return;
-    const dy = start.current.y - e.clientY;
-    const dx = Math.abs(e.clientX - start.current.x);
-    if (dx > Math.abs(dy) + 4) return;
+  const onTouchMove = (e) => {
+    const touch = e.touches?.[0];
+    if (!start.current || !touch) return;
+
+    const dy = start.current.y - touch.clientY;
+    const dx = Math.abs(touch.clientX - start.current.x);
+
+    // The sheet is vertically draggable from anywhere. Ignore horizontal movement.
+    if (dx > Math.abs(dy) + 8) return;
+
     const height = Math.max(1, window.innerHeight || 800);
     setProgressSafe(start.current.progress + dy / height);
+
+    // Do not let the WebView turn a sheet swipe into pull-to-refresh/page scrolling.
     if (e.cancelable) e.preventDefault();
   };
 
   const finish = (e) => {
     if (!start.current) return;
-    const delta = e.clientY - start.current.y;
+
+    const touch = e.changedTouches?.[0];
+    const endY = touch?.clientY ?? start.current.y;
+    const delta = endY - start.current.y;
     const current = progressRef.current;
+
     start.current = null;
     setDragging(false);
-    e.currentTarget.releasePointerCapture?.(e.pointerId);
 
-    // Only dismiss after the sheet has been dragged close to the bottom.
-    // A normal downward swipe from the open position snaps to the middle
-    // instead of unexpectedly closing the sheet.
-    if (delta > 90 && current < 0.44) {
+    // A downward swipe from the sheet dismisses it.
+    if (delta > 90 && current < 0.50) {
       onClose?.();
       return;
     }
@@ -1360,21 +1368,27 @@ function useSheetDrag(open, onClose, initial = 0.94) {
       setProgress(0.08);
       setDragging(false);
       start.current = null;
-      // Let the browser paint the off-screen position first, then animate
-      // the sheet into its full resting position.
       openFrame.current = requestAnimationFrame(() => {
-        openFrame.current = requestAnimationFrame(() => {
-          setProgressSafe(initial);
-        });
+        openFrame.current = requestAnimationFrame(() => setProgressSafe(initial));
       });
     }
+
     return () => {
       if (frame.current) cancelAnimationFrame(frame.current);
       if (openFrame.current) cancelAnimationFrame(openFrame.current);
     };
   }, [open, initial]);
 
-  return { progress, dragging, bind: { onPointerDownCapture: onPointerDown, onPointerMoveCapture: onPointerMove, onPointerUpCapture: finish, onPointerCancelCapture: finish } };
+  return {
+    progress,
+    dragging,
+    bind: {
+      onTouchStartCapture: onTouchStart,
+      onTouchMoveCapture: onTouchMove,
+      onTouchEndCapture: finish,
+      onTouchCancelCapture: finish
+    }
+  };
 }
 
 function formatMoney(value, currency = "$") {
@@ -1774,7 +1788,11 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
 
-  return <main className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`} style={{ overscrollBehaviorY: "none", touchAction: "pan-y" }}>
+  return <main
+    className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
+    style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none", touchAction: "none" }}
+    onTouchMoveCapture={(e) => { if (e.cancelable) e.preventDefault(); }}
+  >
     <style>{styles + createStyles + detailStyles}</style>
 
     <header className="rx-detail-top">
@@ -1894,7 +1912,8 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 }
 
 const detailStyles = `
-.rx-coin-detail-screen{background:#fff!important;color:#111418;overscroll-behavior:none;touch-action:pan-y}
+html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-coin-detail-screen){overscroll-behavior:none!important;overscroll-behavior-y:none!important;overflow:hidden!important}
+.rx-coin-detail-screen{background:#fff!important;color:#111418;overscroll-behavior:none!important;overscroll-behavior-y:none!important;overscroll-behavior-x:none!important;touch-action:none!important}
 .rx-detail-top{height:76px;flex:0 0 76px;padding:calc(8px + env(safe-area-inset-top)) 15px 0;display:grid;grid-template-columns:42px minmax(0,1fr) 42px;align-items:center;gap:8px}
 .rx-detail-back,.rx-detail-down{border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0;width:40px;height:40px}
 .rx-detail-wallet{display:flex;align-items:center;gap:8px;font-size:14px;min-width:0}.rx-detail-wallet strong{font-size:15px}.rx-detail-lock{font-size:13px}.rx-detail-status{width:38px;height:38px;border-radius:50%;background:#eff9df;color:#78b735;display:grid;place-items:center;font-size:16px}
@@ -1923,11 +1942,11 @@ const detailStyles = `
 
 .rx-detail-history-row strong{font-size:13px}.rx-detail-history-row small{font-size:10px}.rx-detail-history-row>b{font-size:12px}
 /* Space Coins dashboard: reference-matched trading chrome only. */
-.rx-chart-toolbar{height:64px;flex:0 0 64px;padding:0 12px 0 30px;display:flex;align-items:center;gap:4px;background:#fff}
+.rx-chart-toolbar{height:64px;flex:0 0 64px;padding:0 4px 0 30px;display:flex;align-items:center;gap:0;background:#fff}
 .rx-chart-toolbar-spacer{flex:1;min-width:0}
 .rx-chart-one-click{display:flex;align-items:center;gap:8px;border:0;background:transparent;color:#b6b9bd;padding:0;font:500 13px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
 .rx-chart-one-click span{width:43px;height:28px;border-radius:16px;background:#d3d5d8;color:#fff;display:grid;place-items:center;font-size:15px}
-.rx-chart-tool{width:40px;height:40px;border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0}
+.rx-chart-tool{width:34px;height:40px;flex:0 0 34px;border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0}
 .rx-open-trades-card{height:38px;margin:0 0 4px;min-width:0;width:100%;box-sizing:border-box;border-radius:10px;background:#f7f8f8;display:flex;align-items:center;padding:0 7px 0 14px;gap:10px;overflow:hidden}
 .rx-open-trades-side{display:flex;align-items:center;gap:8px;white-space:nowrap;border:0;background:transparent;padding:0;color:inherit;font:inherit;cursor:pointer}
 .rx-open-trades-side span{font-size:14px;color:#20252a}
