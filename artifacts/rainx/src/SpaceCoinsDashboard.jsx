@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
-import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
+import { createChart, CrosshairMode, LineStyle, PriceScaleMode } from "lightweight-charts";
 import { registerNativeBackHandler } from "./nativeBackStack";
 import {
   ArrowLeft,
@@ -186,7 +186,7 @@ function CoinList({ coins = COINS, onSelect, loaded = false }) {
             </span>
             <span className="rx-coin-value">
               <strong>{coin.price || (Number.isFinite(Number(coin.current_price)) ? "$" + formatPrice(coin.current_price) : "—")}</strong>
-              <small>{coin.change || (Number.isFinite(Number(coin.price_change_24h)) ? (Number(coin.price_change_24h) >= 0 ? "+" : "") + Number(coin.price_change_24h).toFixed(2) + "%" : "—")}</small>
+              <small className={Number(coin.price_change_24h) < 0 ? "red" : ""}>{coin.change || (Number.isFinite(Number(coin.price_change_24h)) ? (Number(coin.price_change_24h) >= 0 ? "+" : "") + Number(coin.price_change_24h).toFixed(2) + "%" : "—")}</small>
             </span>
           </button>
         )) : loaded ? <div className="rx-empty-coin-list">No Space Coins yet. Create one to see it here.</div> : <div className="rx-empty-coin-list">Loading Space Coins…</div>}
@@ -1156,7 +1156,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       layout: { background: { color: "#FFFFFF" }, textColor: "#8B8F94", fontFamily: "-apple-system,BlinkMacSystemFont,\"SF Pro Display\",\"SF Pro Text\",Arial,sans-serif", fontSize: 10 },
       grid: { vertLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed }, horzLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" }, horzLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" } },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      rightPriceScale: { borderVisible: false, mode: PriceScaleMode.Logarithmic, scaleMargins: { top: 0.08, bottom: 0.08 } },
       leftPriceScale: { visible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2, rightBarStaysOnScroll: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
@@ -1173,7 +1173,23 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       chart.resize(r?.width || el.clientWidth || 340, r?.height || el.clientHeight || 255);
     });
     ro.observe(el);
+    const handleVisibleRangeChange = () => {
+      const scale = chart.priceScale("right");
+      if (scale) {
+        priceScaleMarginsRef.current = { top: 0.08, bottom: 0.08 };
+        scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+      }
+      requestAnimationFrame(() => {
+        const currentScale = chart.priceScale("right");
+        currentScale?.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+        updateEntryCoordinates();
+      });
+    };
+    chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
     return () => {
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -1787,10 +1803,35 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
+  const chartPullGuardRef = useRef(null);
+  const handleChartTouchStart = useCallback((e) => {
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    chartPullGuardRef.current = { x: touch.clientX, y: touch.clientY, multi: (e.touches?.length || 0) > 1 };
+  }, []);
+  const handleChartTouchMove = useCallback((e) => {
+    const start = chartPullGuardRef.current;
+    if (!start || (e.touches?.length || 0) > 1) return;
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dy) > Math.abs(dx) + 8 && dy > 0) {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    }
+  }, []);
+  const handleChartTouchEnd = useCallback(() => {
+    chartPullGuardRef.current = null;
+  }, []);
 
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
     style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none" }}
+    onTouchStartCapture={handleChartTouchStart}
+    onTouchMoveCapture={handleChartTouchMove}
+    onTouchEndCapture={handleChartTouchEnd}
+    onTouchCancelCapture={handleChartTouchEnd}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
@@ -1919,7 +1960,7 @@ html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-
 .rx-detail-account{justify-self:center;max-width:330px;min-width:0;height:44px;padding:0 12px 0 10px;border:1px solid #e2e5e7;border-radius:24px;background:#fff;display:flex;align-items:center;justify-content:center;gap:9px;color:#17191c;box-shadow:0 1px 3px rgba(17,20,24,.03)}.rx-real-pill{padding:4px 9px;border-radius:14px;background:#eef0f2;color:#17191c;font-size:12px;font-weight:500}.rx-detail-account strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;font-weight:700;letter-spacing:-.2px}.rx-detail-account svg{flex:0 0 auto}.rx-detail-top-spacer{display:block;width:42px;height:1px}.rx-detail-wallet,.rx-detail-status,.rx-detail-down{display:none}
 .rx-detail-scroll{position:relative;flex:1;min-width:0;width:100%;max-width:100%;box-sizing:border-box;min-height:0;overflow:hidden;padding:8px 16px calc(76px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;overscroll-behavior:none;overscroll-behavior-y:none;overscroll-behavior-x:none;touch-action:pan-y;overscroll-behavior-block:none}
 .rx-detail-hero-card,.rx-detail-coin-name,.rx-detail-price,.rx-detail-change{display:none}
-.rx-real-chart-shell{position:absolute;inset:0;z-index:1;padding-top:36px;touch-action:none;overscroll-behavior:none}.rx-real-chart{width:100%;height:100%;touch-action:none}.rx-price-axis-gesture{position:absolute;z-index:24;top:36px;right:0;bottom:0;width:42px;touch-action:none;background:transparent}.rx-detail-range{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 18px}.rx-detail-range button{height:39px;border:1px solid #e5e7eb;border-radius:20px;background:#fff;color:#8a8f96;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-range button.active{border-color:#111418;color:#111418;box-shadow:inset 0 0 0 1px #111418}
+.rx-real-chart-shell{position:absolute;inset:0;z-index:1;padding-top:36px;touch-action:none;overscroll-behavior:none;overscroll-behavior-y:none}.rx-real-chart{width:100%;height:100%;touch-action:none;overscroll-behavior:none}.rx-price-axis-gesture{position:absolute;z-index:24;top:36px;right:0;bottom:0;width:42px;touch-action:none;background:transparent}.rx-detail-range{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 18px}.rx-detail-range button{height:39px;border:1px solid #e5e7eb;border-radius:20px;background:#fff;color:#8a8f96;font:700 10px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-detail-range button.active{border-color:#111418;color:#111418;box-shadow:inset 0 0 0 1px #111418}
 .rx-detail-summary,.rx-detail-stat-card,.rx-detail-history-card{border-radius:20px;background:#fff;border:1px solid #edf0f2;box-shadow:0 6px 24px rgba(17,20,24,.04)}.rx-detail-summary{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#edf0f2;overflow:hidden}.rx-detail-summary>div{background:#fff;padding:15px}.rx-detail-summary span,.rx-detail-stat-card span{display:block;color:#8b9096;font-size:10px}.rx-detail-summary strong,.rx-detail-stat-card strong{display:block;margin-top:6px;font-size:14px}
 .rx-detail-stat-card{display:grid;grid-template-columns:1fr 1fr;gap:0;overflow:hidden}.rx-detail-stat-card>div{padding:18px 15px;border-bottom:1px solid #edf0f2}.rx-detail-stat-card>div:nth-child(odd){border-right:1px solid #edf0f2}
 .rx-detail-history-card{overflow:hidden}.rx-detail-history-row{min-height:67px;display:grid;grid-template-columns:45px 1fr auto;gap:10px;align-items:center;padding:10px 13px;border-bottom:1px solid #edf0f2}.rx-detail-history-row:last-child{border-bottom:0}.rx-detail-history-row>span{font-size:10px;font-weight:800}.rx-detail-history-row>span.buy{color:#d7a21a}.rx-detail-history-row>span.sell{color:#111418}.rx-detail-history-row strong,.rx-detail-history-row small{display:block}.rx-detail-history-row strong{font-size:11px}.rx-detail-history-row small{margin-top:4px;color:#8a8f95;font-size:8px}.rx-detail-history-row>b{font-size:10px}.rx-detail-empty-history{padding:25px 16px;color:#8a8f95;font-size:11px;text-align:center}
@@ -2156,6 +2197,7 @@ const styles = `
   display:block;margin-top:5px;color:#43A57C;
   font-size:10.5px;line-height:1;font-weight:800;white-space:nowrap
 }
+.rx-coin-value small.red{color:#D94C4C}
 
 .rx-trending{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .rx-trending button{
