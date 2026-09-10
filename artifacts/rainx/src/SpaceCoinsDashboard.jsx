@@ -1160,7 +1160,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       leftPriceScale: { visible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2, rightBarStaysOnScroll: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-      handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: { time: true, price: true } },
+      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: true } },
     });
     const series = chartType === "line"
       ? chart.addAreaSeries({ lineColor: "#5D80D7", topColor: "rgba(117,147,223,.34)", bottomColor: "rgba(117,147,223,.06)", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 4 })
@@ -1175,12 +1175,21 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
     ro.observe(el);
     const handleVisibleRangeChange = () => {
       const scale = chart.priceScale("right");
-      scale?.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
-      requestAnimationFrame(updateEntryCoordinates);
+      if (scale) {
+        priceScaleMarginsRef.current = { top: 0.08, bottom: 0.08 };
+        scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+      }
+      requestAnimationFrame(() => {
+        const currentScale = chart.priceScale("right");
+        currentScale?.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+        updateEntryCoordinates();
+      });
     };
     chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
     return () => {
       chart.timeScale().unsubscribeVisibleTimeRangeChange(handleVisibleRangeChange);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -1794,10 +1803,35 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
+  const chartPullGuardRef = useRef(null);
+  const handleChartTouchStart = useCallback((e) => {
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    chartPullGuardRef.current = { x: touch.clientX, y: touch.clientY, multi: (e.touches?.length || 0) > 1 };
+  }, []);
+  const handleChartTouchMove = useCallback((e) => {
+    const start = chartPullGuardRef.current;
+    if (!start || (e.touches?.length || 0) > 1) return;
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dy) > Math.abs(dx) + 8 && dy > 0) {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    }
+  }, []);
+  const handleChartTouchEnd = useCallback(() => {
+    chartPullGuardRef.current = null;
+  }, []);
 
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
     style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none" }}
+    onTouchStartCapture={handleChartTouchStart}
+    onTouchMoveCapture={handleChartTouchMove}
+    onTouchEndCapture={handleChartTouchEnd}
+    onTouchCancelCapture={handleChartTouchEnd}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
