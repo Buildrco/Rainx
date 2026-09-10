@@ -1606,6 +1606,34 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     return () => { active = false; };
   }, [market?.id]);
 
+  // Keep the displayed account value synchronized with live equity. The
+  // database keeps realized balance separate from floating P/L; this only
+  // feeds the existing balance display with current equity.
+  const refreshAccountMetrics = useCallback(async () => {
+    if (!market?.id) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user?.id) return;
+    const accountKey = "real:" + user.id;
+    const { data: metrics, error } = await supabase.rpc("space_coin_account_metrics", { p_account_key: accountKey });
+    if (error || !metrics) return;
+    setAccount((current) => ({
+      ...(current || { account_key: accountKey, mode: "real" }),
+      cash_balance: Number(metrics.equity ?? metrics.balance ?? 0),
+      equity: Number(metrics.equity ?? 0),
+      balance: Number(metrics.balance ?? 0),
+      floating_pnl: Number(metrics.floating_pnl ?? 0),
+      margin: Number(metrics.margin ?? 0),
+      free_margin: Number(metrics.free_margin ?? 0),
+      margin_level: metrics.margin_level == null ? null : Number(metrics.margin_level),
+    }));
+  }, [market?.id]);
+
+  useEffect(() => {
+    refreshAccountMetrics();
+    const timer = window.setInterval(refreshAccountMetrics, 2000);
+    return () => window.clearInterval(timer);
+  }, [refreshAccountMetrics]);
+
   const handlePriceChange = useCallback((price, data = null) => {
     setLivePrice(Number(price) || 0.000001);
     if (data) setChartData(data);
@@ -1687,6 +1715,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
          : (account ? { ...account, cash_balance: result?.cash_balance ?? account.cash_balance, token_balances: result?.token_balances ?? account.token_balances } : account));
       setLivePrice(effectivePrice);
       setTrades(latestTrades || trades);
+      await refreshAccountMetrics();
        setNotice(`${tradeSheet === "buy" ? "Buy" : "Sell"} order opened: ${fmt(quantity)} lots @ $${fmt(price)} · ${formatMoney(notional)}`);
       setAmount(""); setTradeSheet(null);
     } catch (error) { setNotice(error?.message || "Trade failed."); }
@@ -1713,6 +1742,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       const closePrice = Number(data?.closing_price || data?.execution_price || price);
       setTrades((old) => old.map((row) => row.id === order.id ? (data?.trade || { ...row, status: "closed", close_price: closePrice, closed_at: new Date().toISOString() }) : row));
       setSelectedOrder(null); setOrdersSheet(false);
+      await refreshAccountMetrics();
       const pnl = Number(data?.pnl ?? selectedPnl({ ...order, close_price: closePrice }));
       setNotice(`Order closed. ${pnl >= 0 ? "Profit" : "Loss"}: ${pnl >= 0 ? "+" : "-"}${formatMoney(Math.abs(pnl))}. Balance updated.`);
     } catch (error) { setNotice(error?.message || "Unable to close order."); }
