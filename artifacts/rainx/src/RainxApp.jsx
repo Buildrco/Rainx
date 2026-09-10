@@ -1724,6 +1724,7 @@ function MainAppContent({ account, onLogout }) {
     const { tab: urlTab, sub } = routeRead();
     return urlTab === "space-coins" ? (sub === "dashboard" ? "dashboard" : "intro") : null;
   });
+  const [spaceCoinsChartActive, setSpaceCoinsChartActive] = useState(false);
   const [scalpingMounted,  setScalpingMounted]  = useState(false);
   useEffect(() => {
     if (tab === "community" && !communityMounted) setCommunityMounted(true);
@@ -2852,7 +2853,7 @@ function MainAppContent({ account, onLogout }) {
   const activeSignal = signalsMap[activeSymbol]?.[selectedTf] || null;
 
   return (
-    <PullToRefresh disabled={spaceCoinsScreen === "dashboard"}>
+    <PullToRefresh disabled={spaceCoinsChartActive}>
       <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
@@ -3161,6 +3162,7 @@ function MainAppContent({ account, onLogout }) {
       )}
       {spaceCoinsScreen === "dashboard" && (
         <SpaceCoinsDashboard
+          onChartScreenChange={setSpaceCoinsChartActive}
           T={T}
           onBack={() => {
             setSpaceCoinsScreen(null);
