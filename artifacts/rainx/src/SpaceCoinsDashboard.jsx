@@ -60,9 +60,21 @@ const REAL_CLOUD_VIDEO =
   "https://d8j0ntlcm91z4.cloudfront.net/user_3BHloZy6zhOMmqbVkiDF/hf_20260821_153425_e7dbe97e-35f8-4ada-80e3-d11209f83006.mp4";
 
 const COINS = [];
+const RAINX_LOGO_DATA_URL =
+  "data:image/jpeg;base64,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";
 // Space Coin order quantities are token quantities. The product calls these
 // "lots", so keep the mapping explicit and shared with the RPC contract.
 const SPACE_COIN_TOKENS_PER_LOT = 1;
+
+function isRainxCoin(coin) {
+  const name = String(coin?.name || "");
+  const symbol = String(coin?.symbol || coin?.ticker || "").replace(/\/USD$/i, "").toUpperCase();
+  return /rainx/i.test(name) || symbol === "RXC";
+}
+
+function getCoinImage(coin) {
+  return coin?.image_url || coin?.image || (isRainxCoin(coin) ? RAINX_LOGO_DATA_URL : coinArtwork);
+}
 
 
 function stop(e) {
@@ -179,7 +191,7 @@ function CoinList({ coins = COINS, onSelect, loaded = false }) {
       <div className="rx-coin-list">
         {coins.length ? coins.map((coin) => (
           <button className="rx-coin-row" key={coin.id || coin.ticker || coin.symbol} onClick={() => onSelect?.(coin)}>
-            <img src={coin.image_url || coin.image} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
+            <img src={getCoinImage(coin)} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
             <span className="rx-coin-name">
               <strong>{coin.name}</strong>
               <small>{coin.symbol || coin.ticker || "COIN"}</small>
@@ -854,7 +866,7 @@ function MyCoinsSheet({ onClose, coins = [] }) {
           const change = Number(coin.price_change_24h || 0);
           return (
             <div className="rx-mycoin" key={coin.id || coin.symbol}>
-              <img src={coin.image_url || coin.image || coinArtwork} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
+              <img src={getCoinImage(coin)} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
 
               <div>
                 <strong>{coin.name}</strong>
@@ -1873,7 +1885,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       <section className="rx-detail-chart-wrap">
         <div className="rx-chart-symbol">
           <span className="rx-chart-symbol-stack">
-            {market.image_url ? <img src={market.image_url} alt="" /> : <span className="rx-chart-symbol-fallback">R</span>}
+            <img src={getCoinImage(market)} alt="" onError={(e) => { e.currentTarget.src = coinArtwork; }} />
             <span className="rx-chart-flag" aria-hidden="true">🇺🇸</span>
           </span>
           <strong>{String(market.symbol || "RXC").replace(/\/USD$/i, "")}<span>/USD</span></strong>
@@ -2229,7 +2241,7 @@ const styles = `
 .rx-coin-row:last-child{border-bottom:0}
 .rx-coin-row>img{
   width:44px;height:44px;border-radius:50%;
-  object-fit:contain;flex:none;display:block
+  object-fit:cover;flex:none;display:block;background:#FDD102
 }
 .rx-coin-name{min-width:0;flex:1;overflow:hidden}
 .rx-coin-name strong{
@@ -2352,7 +2364,7 @@ const styles = `
   gap:10px;align-items:center;padding:12px 0;
   border-bottom:1px solid #ECEDEF
 }
-.rx-mycoin>img{width:40px;height:40px;border-radius:50%}
+.rx-mycoin>img{width:40px;height:40px;border-radius:50%;object-fit:cover;background:#FDD102}
 .rx-mycoin strong,.rx-mycoin small,.rx-mycoin span{display:block}
 .rx-mycoin strong{font-size:11px}
 .rx-mycoin small{margin-top:3px;color:#747A80;font-size:9px}
@@ -2501,7 +2513,7 @@ const createStyles = `
   place-items:center;background:#FFF7DA;color:#D7A21A;
   overflow:hidden;margin-bottom:8px
 }
-.rx-upload-circle img{width:100%;height:100%;object-fit:cover}
+.rx-upload-circle img{width:100%;height:100%;border-radius:50%;object-fit:cover;display:block}
 .rx-upload strong{font-size:12px}
 .rx-upload small{margin-top:4px;color:#747A80;font-size:9px}
 
