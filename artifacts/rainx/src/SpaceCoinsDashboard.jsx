@@ -2040,19 +2040,21 @@ html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-
 `;
 
 const liquidityDashboardStyles = `
-.rx-liquidity-dashboard{background:#fbfbfa!important;color:#17191c}
-.rx-liquidity-dashboard .rx-liquidity-topbar{height:72px;display:grid;grid-template-columns:42px 1fr 42px;align-items:center;padding:calc(8px + env(safe-area-inset-top)) 16px 0;background:#fff;border-bottom:1px solid #edf0f2}
+.rx-liquidity-dashboard{--rx-royal-yellow:#FDD102;background:#fbfbfa!important;color:#17191c}
+.rx-liquidity-dashboard .rx-liquidity-topbar{height:66px;display:grid;grid-template-columns:42px 1fr 42px;align-items:center;padding:calc(4px + env(safe-area-inset-top)) 16px 0;background:#fff;border-bottom:1px solid #edf0f2}
 .rx-liquidity-dashboard .rx-liquidity-topbar h1{margin:0;text-align:center;font:700 18px -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Arial,sans-serif;letter-spacing:-.3px}
 .rx-liquidity-dashboard .rx-liquidity-topbar button{width:40px;height:40px;border:0;background:transparent;color:#17191c;display:grid;place-items:center;padding:0}
-.rx-liquidity-dashboard .rx-native-scroll{padding:14px 16px calc(30px + env(safe-area-inset-bottom));overflow-y:auto}
+.rx-liquidity-dashboard .rx-native-scroll{padding:12px 16px calc(42px + env(safe-area-inset-bottom));overflow-y:auto}
 .rx-liquidity-dashboard .rx-liquidity-tabs{height:46px;margin:0 0 14px}
 .rx-liquidity-dashboard .rx-liquidity-tabs button{font-size:12px}
+.rx-liquidity-dashboard .rx-liquidity-tabs .active:after{left:50%;right:auto;width:120px;transform:translateX(-50%);background:var(--rx-royal-yellow)}
 .rx-liquidity-dashboard .rx-liquidity-art,.rx-liquidity-dashboard .rx-pool-card,.rx-liquidity-dashboard .rx-form-card{border-radius:16px;border-color:#e7e9eb;box-shadow:0 3px 14px rgba(17,20,24,.035)}
 .rx-liquidity-dashboard .rx-liquidity-art{height:150px;padding:18px}
 .rx-liquidity-dashboard .rx-liquidity-art strong{font-size:15px;letter-spacing:-.15px}
 .rx-liquidity-dashboard .rx-liquidity-art small{font-size:11px}
-.rx-liquidity-dashboard .rx-orbit-art{right:34px;bottom:18px;transform:rotate(-12deg) scale(1.12)}
+.rx-liquidity-dashboard .rx-orbit-art{right:34px;bottom:18px;transform:rotate(-12deg) scale(1.12);color:#D3A900}
 .rx-liquidity-dashboard .rx-pool-card,.rx-liquidity-dashboard .rx-form-card{padding:16px}
+.rx-liquidity-dashboard .rx-form-card{padding-bottom:20px}
 .rx-liquidity-dashboard .rx-pool-card h3,.rx-liquidity-dashboard .rx-form-card h3{font-size:13px;margin-bottom:14px}
 .rx-liquidity-dashboard .rx-pool-card>small{font-size:10px;color:#777}
 .rx-liquidity-dashboard .rx-pool-card>div{gap:18px 24px;margin-top:16px}
@@ -2062,6 +2064,7 @@ const liquidityDashboardStyles = `
 .rx-liquidity-dashboard .rx-form-card input{height:42px;border-radius:10px;font-size:13px}
 .rx-liquidity-dashboard .rx-form-card>small{font-size:10px}
 .rx-liquidity-dashboard .rx-gold-cta,.rx-liquidity-dashboard .rx-danger-cta{height:44px;border-radius:11px;font-size:12px;font-weight:800}
+.rx-liquidity-dashboard .rx-gold-cta{margin-top:16px;background:var(--rx-royal-yellow);color:#111418;box-shadow:0 4px 12px rgba(213,174,0,.22)}
 .rx-liquidity-dashboard .rx-warning{font-size:11px;border-radius:13px;padding:13px;margin-bottom:14px}
 .rx-liquidity-dashboard .rx-receive p{padding:12px;border-radius:10px}
 .rx-liquidity-dashboard .rx-receive small{font-size:10px}
