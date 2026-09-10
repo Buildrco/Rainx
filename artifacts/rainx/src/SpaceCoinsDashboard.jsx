@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
-import { createChart, CrosshairMode, LineStyle, PriceScaleMode } from "lightweight-charts";
+import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
 import { registerNativeBackHandler } from "./nativeBackStack";
 import {
   ArrowLeft,
@@ -1156,7 +1156,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       layout: { background: { color: "#FFFFFF" }, textColor: "#8B8F94", fontFamily: "-apple-system,BlinkMacSystemFont,\"SF Pro Display\",\"SF Pro Text\",Arial,sans-serif", fontSize: 10 },
       grid: { vertLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed }, horzLines: { color: "rgba(17,20,24,.045)", style: LineStyle.Dashed } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" }, horzLine: { color: "#D7A21A", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#D7A21A" } },
-      rightPriceScale: { borderVisible: false, mode: PriceScaleMode.Logarithmic, scaleMargins: { top: 0.08, bottom: 0.08 } },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.08, bottom: 0.08 } },
       leftPriceScale: { visible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2, rightBarStaysOnScroll: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
