@@ -2717,7 +2717,7 @@ const createStyles = `
 }
 `;
 
-export default function SpaceCoinsDashboard({ onBack }) {
+export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
   const [mode, setMode] = useState("space");
   const [screen, setScreen] = useState("dashboard");
   const [overlay, setOverlay] = useState(null);
@@ -2752,6 +2752,11 @@ export default function SpaceCoinsDashboard({ onBack }) {
   }, [overlay, screen]);
 
   useEffect(() => registerNativeBackHandler(handleNativeBack, "space-coins"), [handleNativeBack]);
+
+  useEffect(() => {
+    onChartScreenChange?.(screen === "creator");
+    return () => onChartScreenChange?.(false);
+  }, [screen, onChartScreenChange]);
 
   const loadRegistry = useCallback(async () => {
     const { data, error } = await supabase.from("space_coins").select("*").eq("status", "live").order("created_at", { ascending: false });
