@@ -322,8 +322,36 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
   );
 }
 
-function Dashboard({ onMenu, onConnect, coins }) {
-  return <LiquidityScreen dashboard coin={coins?.[0] || null} onMenu={onMenu} onConnect={onConnect} />;
+function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, coinsLoaded, coinActivity = {}, onSelectCoin }) {
+  const [swipeProgress, setSwipeProgress] = useState(0);
+  const [swiping, setSwiping] = useState(false);
+
+  return (
+    <Shell>
+      <style>{styles}</style>
+
+      <div className="rx-space-scroll">
+        <div className="rx-space-inner">
+          <Header onMenu={onMenu} />
+          <CreateBanner onCreate={onCreate} />
+          <ModeToggle mode={mode} setMode={setMode} swipeProgress={swipeProgress} swiping={swiping} />
+
+          <SwipeArea
+            mode={mode}
+            setMode={setMode}
+            coins={coins}
+            coinsLoaded={coinsLoaded}
+            coinActivity={coinActivity}
+            onSelectCoin={onSelectCoin}
+            onMyCoins={onMyCoins}
+            onConnect={onConnect}
+            onProgress={setSwipeProgress}
+            onSwipeStateChange={setSwiping}
+          />
+        </div>
+      </div>
+    </Shell>
+  );
 }
 
 function Field({ label, value, onChange, placeholder }) {
@@ -2597,6 +2625,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
       create: "dashboard",
       menu: "dashboard",
       creator: "dashboard",
+      "liquidity-dashboard": "menu",
       "liquidity-manage": "creator",
       "liquidity-remove": "liquidity-manage",
       "token-settings": "menu",
@@ -2675,7 +2704,14 @@ export default function SpaceCoinsDashboard({ onBack }) {
     return <CreateCoin onBack={() => setScreen("dashboard")} onCreated={(coin) => { setCoins((current) => [coin, ...current.filter((item) => item.id !== coin.id)]); setScreen("dashboard"); }} />;
   }
   if (screen === "menu") {
-    return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("creator")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
+    return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("liquidity-dashboard")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
+  }
+  if (screen === "liquidity-dashboard") {
+    const activeCoin = selectedCoin || coins[0] || null;
+    return <>
+      <LiquidityScreen dashboard coin={activeCoin} onBack={() => setScreen("menu")} onMenu={() => setScreen("menu")} onConnect={() => setOverlay("wallet")} />
+      {overlay === "wallet" && <WalletSheet onClose={() => setOverlay(null)} />}
+    </>;
   }
   if (screen === "creator") {
     const activeCoin = selectedCoin || coins[0] || null;
