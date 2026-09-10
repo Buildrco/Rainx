@@ -1790,8 +1790,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
-    style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none", touchAction: "none" }}
-    onTouchMoveCapture={(e) => { if (e.cancelable) e.preventDefault(); }}
+    style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none" }}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
