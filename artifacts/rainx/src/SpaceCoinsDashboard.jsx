@@ -1415,7 +1415,7 @@ function OrderTabs({ active, setActive }) {
   </div>;
 }
 
-function OrderSheet({ market, orders, pending, closed, livePrice, initialTab = "open", onClose, onSelectOrder }) {
+function OrderSheet({ market, orders, pending, closed, livePrice, getPnl, initialTab = "open", onClose, onSelectOrder }) {
   const [active, setActive] = useState(initialTab);
   const sheet = useSheetDrag(true, onClose, 0.94);
   const rows = active === "open" ? orders : active === "pending" ? pending : closed;
@@ -1426,7 +1426,7 @@ function OrderSheet({ market, orders, pending, closed, livePrice, initialTab = "
       <div className="rx-order-list">
         {rows.length ? rows.map((order) => {
           const price = active === "closed" ? Number(order.close_price || order.price) : Number(livePrice || order.price);
-          const pnl = Number(order.side === "buy" ? (price - order.price) * order.quantity : (order.price - price) * order.quantity);
+          const pnl = Number(getPnl ? getPnl(order) : (order.side === "buy" ? (price - order.price) * order.quantity : (order.price - price) * order.quantity));
           return <button key={order.id} className="rx-order-row" onClick={() => onSelectOrder(order)}>
             <span className={`rx-order-side ${order.side}`}>{order.side === "buy" ? "Buy" : "Sell"}</span>
             <div><strong>{market?.name || "Space Coin"}</strong><small>{order.side === "buy" ? "Buy" : "Sell"} · {Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })} lot</small></div>
@@ -1438,7 +1438,7 @@ function OrderSheet({ market, orders, pending, closed, livePrice, initialTab = "
   </div>;
 }
 
-function OrderDetailSheet({ market, order, livePrice, onClose, onModify, onCloseOrder }) {
+function OrderDetailSheet({ market, order, livePrice, getPnl, onClose, onModify, onCloseOrder }) {
   const [view, setView] = useState("actions");
   const [stopLoss, setStopLoss] = useState(order.stop_loss ? String(order.stop_loss) : "");
   const [takeProfit, setTakeProfit] = useState(order.take_profit ? String(order.take_profit) : "");
@@ -1452,7 +1452,7 @@ function OrderDetailSheet({ market, order, livePrice, onClose, onModify, onClose
       ? (order.close_price || livePrice || order.price)
       : (livePrice || order.price || order.close_price)
   );
-  const pnl = order.side === "buy" ? (price - Number(order.price)) * Number(order.quantity) : (Number(order.price) - price) * Number(order.quantity);
+  const pnl = Number(getPnl ? getPnl(order) : (order.side === "buy" ? (price - Number(order.price)) * Number(order.quantity) : (Number(order.price) - price) * Number(order.quantity)));
   const sideClass = order.side === "buy" ? "buy" : "sell";
   return <div className="rx-order-backdrop" onClick={onClose}>
     <section className="rx-order-detail-sheet" style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 420ms cubic-bezier(.16,1,.3,1)" }} onClick={(e) => e.stopPropagation()} {...sheet.bind}>
@@ -1476,13 +1476,13 @@ function OrderDetailSheet({ market, order, livePrice, onClose, onModify, onClose
   </div>;
 }
 
-function ClosePositionSheet({ order, livePrice, onClose, onConfirm }) {
+function ClosePositionSheet({ order, livePrice, getPnl, onClose, onConfirm }) {
   const sheet = useSheetDrag(Boolean(order), onClose, 0.94);
   if (!order) return null;
   const price = Number(livePrice || order.price);
-  const pnl = order.side === "buy"
+  const pnl = Number(getPnl ? getPnl(order) : (order.side === "buy"
     ? (price - Number(order.price)) * Number(order.quantity)
-    : (Number(order.price) - price) * Number(order.quantity);
+    : (Number(order.price) - price) * Number(order.quantity)));
   return <div className="rx-close-position-backdrop" onClick={onClose}>
     <section
       className="rx-close-position-sheet"
@@ -1566,6 +1566,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const [chartMenuOpen, setChartMenuOpen] = useState(false);
   const [chartFullscreen, setChartFullscreen] = useState(false);
   const [livePrice, setLivePrice] = useState(Number(market?.current_price || market?.initial_price || 0.000001));
+  const [marketLiquidity, setMarketLiquidity] = useState({ tokenReserve: Number(market?.token_reserve || 0), quoteReserve: Number(market?.quote_reserve || 0) });
   const [chartData, setChartData] = useState([]);
   const [positionCoordinates, setPositionCoordinates] = useState({});
   const [trades, setTrades] = useState([]);
@@ -1621,7 +1622,35 @@ function CreatorDashboard({ onBack, onManage, coin }) {
   const pendingOrders = useMemo(() => trades.filter((trade) => trade.status === "pending"), [trades]);
   const closedOrders = useMemo(() => trades.filter((trade) => trade.status === "closed"), [trades]);
   const entryLines = useMemo(() => openOrders.map((order) => ({ id: order.id, price: order.price, side: order.side })), [openOrders]);
-  const selectedPnl = (order) => Number(order?.side === "buy" ? (livePrice - Number(order.price)) * Number(order.quantity) : (Number(order.price) - livePrice) * Number(order.quantity));
+  const selectedPnl = (order) => {
+    if (!order) return 0;
+    const qty = Number(order.quantity);
+    const entryNotional = Number(order.notional);
+    if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(entryNotional)) return 0;
+    if (order.status === "closed") {
+      const closePrice = Number(order.close_price || livePrice || order.price);
+      return order.side === "buy"
+        ? (closePrice - Number(order.price)) * qty
+        : (Number(order.price) - closePrice) * qty;
+    }
+    const x = Number(marketLiquidity.tokenReserve);
+    const y = Number(marketLiquidity.quoteReserve);
+    if (x > 0 && y > 0) {
+      const k = x * y;
+      if (order.side === "buy") {
+        const newX = x + qty;
+        if (newX > 0) {
+          const closeNotional = y - (k / newX);
+          if (Number.isFinite(closeNotional)) return closeNotional - entryNotional;
+        }
+      } else if (qty < x) {
+        const newX = x - qty;
+        const closeNotional = (k / newX) - y;
+        if (Number.isFinite(closeNotional)) return entryNotional - closeNotional;
+      }
+    }
+    return 0;
+  };
 
   useEffect(() => {
     let active = true;
@@ -1695,11 +1724,12 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     let active = true;
     const refreshMarketPrice = async () => {
       const { data } = await supabase.from("space_coins")
-        .select("current_price,initial_price,updated_at")
+        .select("current_price,initial_price,updated_at,token_reserve,quote_reserve")
         .eq("id", market.id).maybeSingle();
       if (!active || !data) return;
       const next = Number(data.current_price || data.initial_price || 0.000001);
       if (Number.isFinite(next) && next > 0) setLivePrice(next);
+      setMarketLiquidity({ tokenReserve: Number(data.token_reserve || 0), quoteReserve: Number(data.quote_reserve || 0) });
     };
     refreshMarketPrice();
     const timer = window.setInterval(refreshMarketPrice, 3000);
@@ -1707,6 +1737,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "space_coins", filter: "id=eq." + market.id }, (payload) => {
         const next = Number(payload.new?.current_price);
         if (Number.isFinite(next) && next > 0) setLivePrice(next);
+        setMarketLiquidity({ tokenReserve: Number(payload.new?.token_reserve || 0), quoteReserve: Number(payload.new?.quote_reserve || 0) });
       }).subscribe();
     return () => { active = false; window.clearInterval(timer); supabase.removeChannel(channel); };
   }, [market?.id]);
@@ -1848,9 +1879,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
     {chartFullscreen && <button className="rx-chart-fullscreen-exit" onClick={() => setChartFullscreen(false)} aria-label="Exit full chart"><Maximize2 size={21} /></button>}
 
     {tradeSheet && <div className="rx-trade-sheet-backdrop" onClick={() => setTradeSheet(null)}><section className="rx-trade-sheet" style={{ transform: `translateY(${Math.max(0, (1 - tradeSheetDrag.progress) * 100)}%)`, transition: tradeSheetDrag.dragging ? "none" : "transform 220ms cubic-bezier(.22,.61,.36,1)" }} onClick={(e) => e.stopPropagation()} {...tradeSheetDrag.bind}><div className="rx-trade-sheet-handle" /><h3>{tradeSheet === "buy" ? "Buy" : "Sell"} {market.symbol}</h3><p>Live price · ${fmt(livePrice)}</p><div className="rx-lot-label"><span>Volume, lots</span><span>Real account</span></div><div className="rx-lot-stepper"><button onClick={() => setAmount(String(Math.max(0.01, (Number(amount) || 0.01) - 0.01).toFixed(2)))}>−</button><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.01" /><button onClick={() => setAmount(String(((Number(amount) || 0) + 0.01).toFixed(2)))}>+</button></div><div className="rx-lot-presets">{["0.01","0.05","0.10","1.00"].map((lot) => <button key={lot} className={amount === lot ? "active" : ""} onClick={() => setAmount(lot)}>{lot}</button>)}</div>{amount && <div className="rx-trade-preview"><span>Estimated value</span><strong>{tradeQuote ? `${fmt(Number(amount))} lots · ${formatTradeValue(Number(tradeQuote.notional))} @ $${fmt(Number(tradeQuote.execution_price))}` : `${fmt(Number(amount))} lots · calculating…`}</strong></div>}<button disabled={!amount || Number(amount) <= 0 || loadingTrade || !tradeQuote} className={tradeSheet === "buy" ? "confirm-buy" : "confirm-sell"} onClick={executeTrade}>{loadingTrade ? "Processing…" : `Confirm ${tradeSheet === "buy" ? "Buy" : "Sell"} ${amount || "0.00"} lots`}</button>{notice && <div className="rx-detail-notice">{notice}</div>}</section></div>}
-    {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} initialTab={ordersSheetTab} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
-    {selectedOrder && <OrderDetailSheet market={market} order={selectedOrder} livePrice={livePrice} onClose={() => setSelectedOrder(null)} onModify={modifyOrder} onCloseOrder={closeOrder} />}
-    {closeConfirmOrder && <ClosePositionSheet order={closeConfirmOrder} livePrice={livePrice} onClose={() => setCloseConfirmOrder(null)} onConfirm={async (order) => { setCloseConfirmOrder(null); await closeOrder(order); }} />}
+    {ordersSheet && <OrderSheet market={market} orders={openOrders} pending={pendingOrders} closed={closedOrders} livePrice={livePrice} getPnl={selectedPnl} initialTab={ordersSheetTab} onClose={() => setOrdersSheet(false)} onSelectOrder={(order) => { setOrdersSheet(false); setSelectedOrder(order); }} />}
+    {selectedOrder && <OrderDetailSheet market={market} order={selectedOrder} livePrice={livePrice} getPnl={selectedPnl} onClose={() => setSelectedOrder(null)} onModify={modifyOrder} onCloseOrder={closeOrder} />}
+    {closeConfirmOrder && <ClosePositionSheet order={closeConfirmOrder} livePrice={livePrice} getPnl={selectedPnl} onClose={() => setCloseConfirmOrder(null)} onConfirm={async (order) => { setCloseConfirmOrder(null); await closeOrder(order); }} />}
   </main>;
 }
 
