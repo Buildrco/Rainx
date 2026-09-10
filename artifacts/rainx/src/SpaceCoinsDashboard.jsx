@@ -322,36 +322,8 @@ function SwipeArea({ mode, setMode, onMyCoins, onConnect, onProgress, onSwipeSta
   );
 }
 
-function Dashboard({ mode, setMode, onCreate, onMenu, onMyCoins, onConnect, coins, coinsLoaded, coinActivity = {}, onSelectCoin }) {
-  const [swipeProgress, setSwipeProgress] = useState(0);
-  const [swiping, setSwiping] = useState(false);
-
-  return (
-    <Shell>
-      <style>{styles}</style>
-
-      <div className="rx-space-scroll">
-        <div className="rx-space-inner">
-          <Header onMenu={onMenu} />
-          <CreateBanner onCreate={onCreate} />
-          <ModeToggle mode={mode} setMode={setMode} swipeProgress={swipeProgress} swiping={swiping} />
-
-          <SwipeArea
-            mode={mode}
-            setMode={setMode}
-            coins={coins}
-            coinsLoaded={coinsLoaded}
-            coinActivity={coinActivity}
-            onSelectCoin={onSelectCoin}
-            onMyCoins={onMyCoins}
-            onConnect={onConnect}
-            onProgress={setSwipeProgress}
-            onSwipeStateChange={setSwiping}
-          />
-        </div>
-      </div>
-    </Shell>
-  );
+function Dashboard({ onMenu, onConnect, coins }) {
+  return <LiquidityScreen dashboard coin={coins?.[0] || null} onMenu={onMenu} onConnect={onConnect} />;
 }
 
 function Field({ label, value, onChange, placeholder }) {
@@ -1079,6 +1051,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
 
   const priceDragRef = useRef(null);
   const priceScaleMarginsRef = useRef({ top: 0.08, bottom: 0.08 });
+  const priceAxisFrameRef = useRef(null);
   const resetPriceScale = useCallback(() => {
     const scale = chartRef.current?.priceScale("right");
     if (!scale) return;
@@ -1086,33 +1059,36 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
     scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
   }, []);
   const handlePriceAxisPointerDown = useCallback((e) => {
+    e.stopPropagation?.();
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    priceDragRef.current = { y: e.clientY };
+    const margins = priceScaleMarginsRef.current;
+    priceDragRef.current = { startY: e.clientY, startMargin: (margins.top + margins.bottom) / 2, lastMargin: (margins.top + margins.bottom) / 2 };
   }, []);
   const handlePriceAxisPointerMove = useCallback((e) => {
-    const start = priceDragRef.current;
-    if (!start) return;
-    const dy = e.clientY - start.y;
-    if (Math.abs(dy) < 2) return;
+    const drag = priceDragRef.current;
+    if (!drag) return;
+    e.stopPropagation?.();
     const scale = chartRef.current?.priceScale("right");
     const chartHeight = Math.max(1, containerRef.current?.clientHeight || 255);
     if (!scale) return;
-    // Lightweight Charts 4.2 exposes priceScale.applyOptions/autoScale rather
-    // than the set/getVisibleRange API introduced later. Adjusting scaleMargins
-    // gives a real vertical price-axis zoom without depending on v5-only APIs.
-    const current = priceScaleMarginsRef.current;
-    const delta = (dy / chartHeight) * 0.85;
-    const nextMargin = Math.max(0.01, Math.min(0.44, ((current.top + current.bottom) / 2) + delta));
+    const delta = ((e.clientY - drag.startY) / chartHeight) * 0.85;
+    const nextMargin = Math.max(0.01, Math.min(0.44, drag.startMargin + delta));
+    if (Math.abs(nextMargin - drag.lastMargin) < 0.001) return;
+    drag.lastMargin = nextMargin;
     priceScaleMarginsRef.current = { top: nextMargin, bottom: nextMargin };
-    scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
-    start.y = e.clientY;
+    if (priceAxisFrameRef.current) cancelAnimationFrame(priceAxisFrameRef.current);
+    priceAxisFrameRef.current = requestAnimationFrame(() => {
+      if (priceDragRef.current !== drag || !chartRef.current) return;
+      chartRef.current.priceScale("right").applyOptions({ autoScale: false, scaleMargins: priceScaleMarginsRef.current });
+    });
     e.preventDefault?.();
   }, []);
   const handlePriceAxisPointerUp = useCallback((e) => {
+    if (priceAxisFrameRef.current) cancelAnimationFrame(priceAxisFrameRef.current);
     priceDragRef.current = null;
+    e.stopPropagation?.();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
   }, []);
-
   const load = useCallback(async () => {
     if (!coin?.id || !seriesRef.current) return;
     const requestId = ++loadSeqRef.current;
@@ -1183,7 +1159,11 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       requestAnimationFrame(() => {
         if (chartRef.current !== chart) return;
         chart.priceScale("right").applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
-        updateEntryCoordinates();
+        requestAnimationFrame(() => {
+          if (chartRef.current !== chart) return;
+          chart.priceScale("right").applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+          updateEntryCoordinates();
+        });
       });
     };
     chart.timeScale().subscribeVisibleTimeRangeChange(handleVisibleRangeChange);
@@ -1804,9 +1784,27 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
+  const chartPullGuardRef = useRef(null);
+  const handleChartTouchStart = useCallback((e) => {
+    const touch = e.touches?.[0];
+    if (!touch) return;
+    chartPullGuardRef.current = { y: touch.clientY };
+  }, []);
+  const handleChartTouchMove = useCallback((e) => {
+    const start = chartPullGuardRef.current;
+    const touch = e.touches?.[0];
+    const target = e.target instanceof Element ? e.target : null;
+    if (!start || !touch || target?.closest?.("[class*=\"sheet\"]")) return;
+    if (touch.clientY - start.y > 8 && e.cancelable) e.preventDefault();
+  }, []);
+  const handleChartTouchEnd = useCallback(() => { chartPullGuardRef.current = null; }, []);
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
     style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none", touchAction: "pan-y" }}
+    onTouchStart={handleChartTouchStart}
+    onTouchMove={handleChartTouchMove}
+    onTouchEnd={handleChartTouchEnd}
+    onTouchCancel={handleChartTouchEnd}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
@@ -2001,15 +1999,68 @@ html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-
 
 `;
 
-function LiquidityScreen({ onBack, remove = false }) {
+const liquidityDashboardStyles = `
+.rx-liquidity-dashboard{background:#fbfbfa!important;color:#17191c}
+.rx-liquidity-dashboard .rx-liquidity-topbar{height:72px;display:grid;grid-template-columns:42px 1fr 42px;align-items:center;padding:calc(8px + env(safe-area-inset-top)) 16px 0;background:#fff;border-bottom:1px solid #edf0f2}
+.rx-liquidity-dashboard .rx-liquidity-topbar h1{margin:0;text-align:center;font:700 18px -apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue",Arial,sans-serif;letter-spacing:-.3px}
+.rx-liquidity-dashboard .rx-liquidity-topbar button{width:40px;height:40px;border:0;background:transparent;color:#17191c;display:grid;place-items:center;padding:0}
+.rx-liquidity-dashboard .rx-native-scroll{padding:14px 16px calc(30px + env(safe-area-inset-bottom));overflow-y:auto}
+.rx-liquidity-dashboard .rx-liquidity-tabs{height:46px;margin:0 0 14px}
+.rx-liquidity-dashboard .rx-liquidity-tabs button{font-size:12px}
+.rx-liquidity-dashboard .rx-liquidity-art,.rx-liquidity-dashboard .rx-pool-card,.rx-liquidity-dashboard .rx-form-card{border-radius:16px;border-color:#e7e9eb;box-shadow:0 3px 14px rgba(17,20,24,.035)}
+.rx-liquidity-dashboard .rx-liquidity-art{height:150px;padding:18px}
+.rx-liquidity-dashboard .rx-liquidity-art strong{font-size:15px;letter-spacing:-.15px}
+.rx-liquidity-dashboard .rx-liquidity-art small{font-size:11px}
+.rx-liquidity-dashboard .rx-orbit-art{right:34px;bottom:18px;transform:rotate(-12deg) scale(1.12)}
+.rx-liquidity-dashboard .rx-pool-card,.rx-liquidity-dashboard .rx-form-card{padding:16px}
+.rx-liquidity-dashboard .rx-pool-card h3,.rx-liquidity-dashboard .rx-form-card h3{font-size:13px;margin-bottom:14px}
+.rx-liquidity-dashboard .rx-pool-card>small{font-size:10px;color:#777}
+.rx-liquidity-dashboard .rx-pool-card>div{gap:18px 24px;margin-top:16px}
+.rx-liquidity-dashboard .rx-pool-card p small{font-size:10px}
+.rx-liquidity-dashboard .rx-pool-card p strong{font-size:14px}
+.rx-liquidity-dashboard .rx-form-card label{font-size:10px;margin:14px 0;color:#62676d}
+.rx-liquidity-dashboard .rx-form-card input{height:42px;border-radius:10px;font-size:13px}
+.rx-liquidity-dashboard .rx-form-card>small{font-size:10px}
+.rx-liquidity-dashboard .rx-gold-cta,.rx-liquidity-dashboard .rx-danger-cta{height:44px;border-radius:11px;font-size:12px;font-weight:800}
+.rx-liquidity-dashboard .rx-warning{font-size:11px;border-radius:13px;padding:13px;margin-bottom:14px}
+.rx-liquidity-dashboard .rx-receive p{padding:12px;border-radius:10px}
+.rx-liquidity-dashboard .rx-receive small{font-size:10px}
+.rx-liquidity-dashboard .rx-receive strong{font-size:14px}
+.rx-liquidity-dashboard .rx-receive em{font-size:10px}
+.rx-liquidity-dashboard .rx-slider-labels{font-size:10px}
+`;
+
+function LiquidityScreen({ onBack, remove = false, coin = null, dashboard = false, onMenu, onConnect }) {
   const [activeRemove, setActiveRemove] = useState(remove);
   const [dragX, setDragX] = useState(0);
   const swipe = useHorizontalSwipe(() => { setActiveRemove(true); setDragX(0); }, () => { setActiveRemove(false); setDragX(0); }, (dx) => setDragX(Math.max(-window.innerWidth, Math.min(window.innerWidth, dx))));
   const trackStyle = { transform: "translate3d(calc(" + (activeRemove ? -50 : 0) + "% + " + dragX + "px),0,0)", transition: dragX === 0 ? "transform .28s cubic-bezier(.2,.8,.2,1)" : "none" };
-  return <><style>{styles}</style><div className="rx-native-screen rx-liquidity-screen" {...swipe}><NativeHeader title="Manage Liquidity" onBack={onBack} right={<CircleHelp size={18} />} /><div className="rx-native-scroll"><div className="rx-liquidity-tabs"><button className={!activeRemove ? "active" : ""} onClick={() => { setActiveRemove(false); setDragX(0); }}>Add Liquidity</button><button className={activeRemove ? "active" : ""} onClick={() => { setActiveRemove(true); setDragX(0); }}>Remove Liquidity</button></div><div className="rx-liquidity-swipe"><div className="rx-liquidity-track" style={trackStyle}><div className="rx-liquidity-panel"><AddLiquidity /></div><div className="rx-liquidity-panel"><RemoveLiquidity /></div></div></div></div></div></>;
+  const symbol = String(coin?.symbol || "RXC").replace(/\/USD$/i, "");
+  return <><style>{styles + liquidityDashboardStyles}</style><div className={"rx-native-screen rx-liquidity-screen" + (dashboard ? " rx-liquidity-dashboard" : "")} {...swipe}>
+    {dashboard ? <header className="rx-liquidity-topbar"><button onClick={onMenu} aria-label="Open menu"><Menu size={22} /></button><h1>Liquidity</h1><span /></header> : <NativeHeader title="Manage Liquidity" onBack={onBack} right={<CircleHelp size={18} />} />}
+    <div className="rx-native-scroll"><div className="rx-liquidity-tabs"><button className={!activeRemove ? "active" : ""} onClick={() => { setActiveRemove(false); setDragX(0); }}>Add Liquidity</button><button className={activeRemove ? "active" : ""} onClick={() => { setActiveRemove(true); setDragX(0); }}>Remove Liquidity</button></div><div className="rx-liquidity-swipe"><div className="rx-liquidity-track" style={trackStyle}><div className="rx-liquidity-panel"><AddLiquidity coin={coin} symbol={symbol} onConnect={onConnect} /></div><div className="rx-liquidity-panel"><RemoveLiquidity coin={coin} symbol={symbol} onConnect={onConnect} /></div></div></div></div>
+  </div></>;
 }
-function AddLiquidity() { return <><div className="rx-liquidity-art"><strong>Your Liquidity Pool</strong><small>SDOGE / USDT</small><div className="rx-orbit-art"><Droplets size={58} /></div></div><div className="rx-pool-card"><h3>Pool Balance</h3><div><p><small>SDOGE</small><strong>102.45M</strong></p><p><small>USDT</small><strong>45,678.56</strong></p><p><small>LP Tokens</small><strong>8,945.32</strong></p><p><small>Pool Share</small><strong>24.58%</strong></p></div></div><div className="rx-form-card"><h3>Add Liquidity</h3><label>Amount of SDOGE <span>Balance: 12,460,000</span><input value="10,000,000" readOnly /></label><label>Amount of USDT <span>Balance: 3,210</span><input value="2,450" readOnly /></label><small>1 SDOGE = 0.000245 USDT</small><button className="rx-gold-cta">Add Liquidity</button></div></>; }
-function RemoveLiquidity() { return <><div className="rx-warning"><ShieldCheck size={17} /><span>Removing liquidity will reduce your pool share and may affect price stability.</span></div><div className="rx-pool-card"><h3>Your Liquidity</h3><small>SDOGE / USDT</small><div><p><small>Pool Share</small><strong>24.58%</strong></p><p><small>LP Tokens</small><strong>8,945.32</strong></p></div></div><div className="rx-form-card"><h3>You Will Receive</h3><div className="rx-receive"><p><small>SDOGE</small><strong>10,000,000</strong><em>~$2,450.00</em></p><p><small>USDT</small><strong>2,450</strong><em>~$2,450.00</em></p></div><div className="rx-slider"><span /><b>50%</b></div><div className="rx-slider-labels"><span>25%</span><span>50%</span><span>75%</span><span>MAX</span></div><button className="rx-danger-cta">Remove Liquidity</button></div></>; }
+function AddLiquidity({ coin, symbol = "RXC", onConnect }) {
+  const price = Number(coin?.current_price || coin?.initial_price || 0);
+  const tokenReserve = Number(coin?.token_reserve || 0);
+  const quoteReserve = Number(coin?.quote_reserve || 0);
+  const [tokenAmount, setTokenAmount] = useState("");
+  const [quoteAmount, setQuoteAmount] = useState("");
+  const format = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const updateToken = (value) => { setTokenAmount(value); const amount = Number(value); setQuoteAmount(Number.isFinite(amount) && amount > 0 && price > 0 ? (amount * price).toFixed(2) : ""); };
+  const updateQuote = (value) => { setQuoteAmount(value); const amount = Number(value); setTokenAmount(Number.isFinite(amount) && amount > 0 && price > 0 ? (amount / price).toFixed(2) : ""); };
+  return <><div className="rx-liquidity-art"><strong>{symbol} Liquidity Pool</strong><small>{symbol} / USDT</small><div className="rx-orbit-art"><Droplets size={58} /></div></div><div className="rx-pool-card"><h3>Pool Balance</h3><div><p><small>{symbol}</small><strong>{format(tokenReserve)}</strong></p><p><small>USDT</small><strong>{format(quoteReserve)}</strong></p><p><small>Price</small><strong>{price > 0 ? formatPrice(price) : "—"}</strong></p><p><small>Pool Share</small><strong>{coin ? "100%" : "—"}</strong></p></div></div><div className="rx-form-card"><h3>Add Liquidity</h3><label>Amount of {symbol}<span>Balance: {format(tokenReserve)}</span><input value={tokenAmount} onChange={(e) => updateToken(e.target.value)} inputMode="decimal" placeholder="0.00" /></label><label>Amount of USDT<span>Balance: {format(quoteReserve)}</span><input value={quoteAmount} onChange={(e) => updateQuote(e.target.value)} inputMode="decimal" placeholder="0.00" /></label><small>{price > 0 ? "1 " + symbol + " = " + formatPrice(price) + " USDT" : "Connect a wallet to view the pool price"}</small><button type="button" className="rx-gold-cta" onClick={onConnect}>Connect Wallet</button></div></>;
+}
+function RemoveLiquidity({ coin, symbol = "RXC", onConnect }) {
+  const tokenReserve = Number(coin?.token_reserve || 0);
+  const quoteReserve = Number(coin?.quote_reserve || 0);
+  const [percent, setPercent] = useState(50);
+  const format = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const tokenOut = tokenReserve * percent / 100;
+  const quoteOut = quoteReserve * percent / 100;
+  return <><div className="rx-warning"><ShieldCheck size={17} /><span>Removing liquidity will reduce your pool share and may affect price stability.</span></div><div className="rx-pool-card"><h3>Your Liquidity</h3><small>{symbol} / USDT</small><div><p><small>Pool Share</small><strong>{coin ? "100%" : "—"}</strong></p><p><small>LP Tokens</small><strong>{coin ? format(Math.sqrt(Math.max(0, tokenReserve * quoteReserve))) : "—"}</strong></p></div></div><div className="rx-form-card"><h3>You Will Receive</h3><div className="rx-receive"><p><small>{symbol}</small><strong>{format(tokenOut)}</strong><em>Pool share: {percent}%</em></p><p><small>USDT</small><strong>{format(quoteOut)}</strong><em>Pool share: {percent}%</em></p></div><div className="rx-slider"><span style={{ width: percent + "%" }} /><b>{percent}%</b></div><input aria-label="Liquidity percentage" type="range" min="0" max="100" step="1" value={percent} onChange={(e) => setPercent(Number(e.target.value))} style={{ width: "100%", accentColor: "#c89112" }} /><div className="rx-slider-labels"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>MAX</span></div><button type="button" className="rx-danger-cta" onClick={onConnect}>Connect Wallet</button></div></>;
+}
 
 const styles = `
 .rx-space-shell,.rx-space-shell *{box-sizing:border-box}
