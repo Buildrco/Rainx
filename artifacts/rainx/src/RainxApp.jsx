@@ -1605,7 +1605,7 @@ function classifyNotification(notification) {
   return "home";
 }
 
-function PullToRefresh({ children }) {
+function PullToRefresh({ children, disabled = false }) {
   const [distance, setDistance] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const touch = useRef(null);
@@ -1624,11 +1624,13 @@ function PullToRefresh({ children }) {
   };
   const excluded = (target) => target?.closest?.("button, input, textarea, select, [contenteditable='true'], canvas, svg, video, a");
   const onTouchStart = (event) => {
+    if (disabled) return;
     if (refreshing || excluded(event.target)) return;
     const parent = getScrollParent(event.target);
     if (parent.scrollTop <= 0) touch.current = { x: event.touches[0].clientX, y: event.touches[0].clientY, parent, vertical: false };
   };
   const onTouchMove = (event) => {
+    if (disabled) return;
     const active = touch.current;
     if (!active || refreshing) return;
     const dx = event.touches[0].clientX - active.x;
@@ -1645,6 +1647,7 @@ function PullToRefresh({ children }) {
     setDistance(Math.min(88, dy * 0.9));
   };
   const onTouchEnd = () => {
+    if (disabled) return;
     const active = touch.current;
     touch.current = null;
     if (!active?.vertical) { setDistance(0); return; }
@@ -1659,9 +1662,9 @@ function PullToRefresh({ children }) {
 
   return (
     <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchEnd}>
-      <div className={`rx-pull-refresh-indicator${refreshing ? " is-refreshing" : ""}`} style={{ opacity: Math.min(1, distance / threshold), transform: `translate(-50%, ${Math.max(-52, distance - 58)}px) scale(${Math.min(1, 0.65 + distance / (threshold * 3))})`, transition: distance > 0 && !refreshing ? "none" : undefined }} aria-hidden="true">
+      {!disabled && <div className={`rx-pull-refresh-indicator${refreshing ? " is-refreshing" : ""}`} style={{ opacity: Math.min(1, distance / threshold), transform: `translate(-50%, ${Math.max(-52, distance - 58)}px) scale(${Math.min(1, 0.65 + distance / (threshold * 3))})`, transition: distance > 0 && !refreshing ? "none" : undefined }} aria-hidden="true">
         <img src={rainxLogoTransparent} alt="" />
-      </div>
+      </div>}
       {children}
     </div>
   );
@@ -2849,7 +2852,7 @@ function MainAppContent({ account, onLogout }) {
   const activeSignal = signalsMap[activeSymbol]?.[selectedTf] || null;
 
   return (
-    <PullToRefresh>
+    <PullToRefresh disabled={spaceCoinsScreen === "dashboard"}>
       <div ref={appRootRef} className="rx-app-root" style={{ height: "100dvh", minHeight: "100dvh", overflowY: "auto", overflowX: "hidden", background: tab === "home" ? "#FFFFFF" : T.ink, color: T.paper, fontFamily: FONT_BODY, maxWidth: 480, margin: "0 auto", position: "relative", isolation: "isolate", paddingBottom: "calc(96px + env(safe-area-inset-bottom))" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap');
