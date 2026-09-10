@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
 import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
+import { Drawer } from "vaul";
 import { registerNativeBackHandler } from "./nativeBackStack";
 import {
   ArrowLeft,
@@ -1039,7 +1040,15 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
     if (!series) return;
     if (chartType === "line") series.setData(bars.map((b) => ({ time: b.time, value: b.close })));
     else series.setData(bars);
-    chart?.timeScale().fitContent();
+    const timeScale = chart?.timeScale();
+    if (timeScale && bars.length) {
+      const width = containerRef.current?.clientWidth || 340;
+      const visibleBars = Math.max(28, Math.floor(width / 8));
+      timeScale.setVisibleLogicalRange({
+        from: Math.max(0, bars.length - visibleBars),
+        to: bars.length - 1 + 3,
+      });
+    }
   }, [chartType]);
 
   const updateEntryCoordinates = useCallback(() => {
@@ -1160,7 +1169,7 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       leftPriceScale: { visible: false },
       timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, rightOffset: 3, barSpacing: 8, minBarSpacing: 2, rightBarStaysOnScroll: true },
       handleScroll: { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-      handleScale: { mouseWheel: false, pinch: true, axisPressedMouseMove: { time: true, price: true } },
+      handleScale: { mouseWheel: false, pinch: false, axisPressedMouseMove: { time: false, price: true } },
     });
     const series = chartType === "line"
       ? chart.addAreaSeries({ lineColor: "#5D80D7", topColor: "rgba(117,147,223,.34)", bottomColor: "rgba(117,147,223,.06)", lineWidth: 2, priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: true, crosshairMarkerRadius: 4 })
@@ -1391,6 +1400,36 @@ function useSheetDrag(open, onClose, initial = 0.94) {
   };
 }
 
+function ChartBottomSheet({ children, onClose, contentClassName }) {
+  const [activeSnapPoint, setActiveSnapPoint] = useState("94%");
+
+  return (
+    <Drawer.Root
+      open
+      modal
+      dismissible
+      noBodyStyles
+      shouldScaleBackground={false}
+      closeThreshold={0.25}
+      fadeFromIndex={0}
+      snapPoints={["42%", "68%", "94%"]}
+      activeSnapPoint={activeSnapPoint}
+      setActiveSnapPoint={setActiveSnapPoint}
+      onOpenChange={(open) => {
+        if (!open) onClose?.();
+      }}
+    >
+      <Drawer.Portal>
+        <Drawer.Overlay className="rx-chart-sheet-overlay" />
+        <Drawer.Content className={contentClassName}>
+          <div className="rx-sheet-drag-handle" />
+          {children}
+        </Drawer.Content>
+      </Drawer.Portal>
+    </Drawer.Root>
+  );
+}
+
 function formatMoney(value, currency = "$") {
   const n = Number(value || 0);
   return `${n >= 0 ? currency : `-${currency}`}${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1499,54 +1538,41 @@ function OrderDetailSheet({ market, order, livePrice, getPnl, onClose, onModify,
 }
 
 function ClosePositionSheet({ order, livePrice, getPnl, onClose, onConfirm }) {
-  const sheet = useSheetDrag(Boolean(order), onClose, 0.94);
   if (!order) return null;
   const price = Number(livePrice || order.price);
   const pnl = Number(getPnl ? getPnl(order) : (order.side === "buy"
     ? (price - Number(order.price)) * Number(order.quantity)
     : (Number(order.price) - price) * Number(order.quantity)));
-  return <div className="rx-close-position-backdrop" onClick={onClose}>
-    <section
-      className="rx-close-position-sheet"
-      style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 420ms cubic-bezier(.16,1,.3,1)" }}
-      onClick={(e) => e.stopPropagation()}
-      {...sheet.bind}
-    >
-      <div className="rx-sheet-drag-handle" />
-      <h3>Close position #{String(order.id).slice(0, 9)}?</h3>
+  return (
+    <ChartBottomSheet onClose={onClose} contentClassName="rx-close-position-sheet">
+      <Drawer.Title asChild>
+        <h3>Close position #{String(order.id).slice(0, 9)}?</h3>
+      </Drawer.Title>
       <div><span>Lots</span><b>{Number(order.quantity).toLocaleString(undefined, { maximumFractionDigits: 8 })}</b></div>
       <div><span>Closing price</span><b>{fmtPrice(price)}</b></div>
       <div><span>Profit</span><b className={pnl >= 0 ? "profit" : "loss"}>{pnl >= 0 ? "+" : "-"}{formatMoney(Math.abs(pnl))}</b></div>
       <button className="rx-close-position-confirm" onClick={() => onConfirm(order)}>Confirm</button>
       <button className="rx-close-position-cancel" onClick={onClose}>Cancel</button>
-    </section>
-  </div>;
+    </ChartBottomSheet>
+  );
 }
 
 function ChartTypeSheet({ value, onSelect, onClose }) {
-  const sheet = useSheetDrag(true, onClose, 0.94);
   const options = [
     ["candles", "Candlesticks", CandlestickChart],
     ["line", "Line", BarChart3],
   ];
-  return <div className="rx-chart-type-backdrop" onClick={onClose}>
-    <section
-      className="rx-chart-type-sheet"
-      style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 420ms cubic-bezier(.16,1,.3,1)" }}
-      onClick={(e) => e.stopPropagation()}
-      {...sheet.bind}
-    >
-      <div className="rx-sheet-drag-handle" />
-      <h3>Chart type</h3>
+  return (
+    <ChartBottomSheet onClose={onClose} contentClassName="rx-chart-type-sheet">
+      <Drawer.Title asChild><h3>Chart type</h3></Drawer.Title>
       <div className="rx-chart-type-list">
         {options.map(([key, label, Icon]) => <button key={key} onClick={() => onSelect(key)}><span><Icon size={21} />{label}</span>{value === key && <Check size={25} strokeWidth={2.5} />}</button>)}
       </div>
-    </section>
-  </div>;
+    </ChartBottomSheet>
+  );
 }
 
 function TimeframeSheet({ value, onSelect, onClose }) {
-  const sheet = useSheetDrag(true, onClose, 0.94);
   const options = [
     ["1m", "1 minute"],
     ["3m", "3 minutes"],
@@ -1561,20 +1587,14 @@ function TimeframeSheet({ value, onSelect, onClose }) {
     ["1W", "1 week"],
     ["1M", "1 month"]
   ];
-  return <div className="rx-timeframe-backdrop" onClick={onClose}>
-    <section
-      className="rx-timeframe-sheet"
-      style={{ transform: `translateY(${Math.max(0, (1 - sheet.progress) * 100)}%)`, transition: sheet.dragging ? "none" : "transform 420ms cubic-bezier(.16,1,.3,1)" }}
-      onClick={(e) => e.stopPropagation()}
-      {...sheet.bind}
-    >
-      <div className="rx-sheet-drag-handle" />
-      <h3>Time frame</h3>
+  return (
+    <ChartBottomSheet onClose={onClose} contentClassName="rx-timeframe-sheet">
+      <Drawer.Title asChild><h3>Time frame</h3></Drawer.Title>
       <div className="rx-timeframe-list">
         {options.map(([key, label]) => <button key={key} onClick={() => onSelect(key)}><span>{label}</span>{value === key && <Check size={27} strokeWidth={2.5} />}</button>)}
       </div>
-    </section>
-  </div>;
+    </ChartBottomSheet>
+  );
 }
 
 function fmtPrice(value) { return formatPrice(value); }
@@ -1978,9 +1998,11 @@ html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-
 .rx-fullscreen-account{position:absolute;z-index:101;top:calc(12px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);height:44px;max-width:330px;min-width:0;padding:0 12px 0 10px;border:1px solid #e2e5e7;border-radius:24px;background:#fff;display:flex;align-items:center;justify-content:center;gap:9px;color:#17191c;box-shadow:0 1px 3px rgba(17,20,24,.03)}
 .rx-fullscreen-account strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;font-weight:700;letter-spacing:-.2px}.rx-fullscreen-account svg{flex:0 0 auto}
 .rx-chart-fullscreen-exit{position:absolute;z-index:102;top:calc(12px + env(safe-area-inset-top));right:12px;left:auto;width:40px;height:40px;border:1px solid #dce1e5;border-radius:9px;background:#f5f6f7;color:#111418;display:grid;place-items:center}
-.rx-close-position-backdrop,.rx-timeframe-backdrop,.rx-chart-type-backdrop{animation:rx-sheet-backdrop-in .22s ease-out both}.rx-close-position-backdrop,.rx-timeframe-backdrop,.rx-chart-type-backdrop{position:fixed;inset:0;z-index:70;background:rgba(17,20,24,.38);display:flex;align-items:flex-end;overflow:hidden;touch-action:none}.rx-close-position-sheet,.rx-timeframe-sheet,.rx-chart-type-sheet{width:100%;max-height:92dvh;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.22);will-change:transform;touch-action:none;overflow:hidden}.rx-close-position-sheet{padding:9px 31px calc(18px + env(safe-area-inset-bottom))}.rx-close-position-sheet h3{margin:16px 0 19px;font-size:21px;letter-spacing:-.3px}.rx-close-position-sheet>div{display:flex;align-items:center;justify-content:space-between;padding:7px 0;color:#747a80;font-size:14px}.rx-close-position-sheet>div b{color:#17191c;font-weight:500}.rx-close-position-confirm,.rx-close-position-cancel{width:100%;height:48px;border:0;border-radius:11px;margin-top:13px;font:500 14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-position-confirm{background:#F4D35E;color:#111418}.rx-close-position-cancel{margin-top:9px;background:#f1f2f4;color:#272b2f}.rx-timeframe-sheet{height:min(78dvh,720px);padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}.rx-timeframe-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-timeframe-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.rx-timeframe-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-timeframe-list button:active{background:#f7f7f7}.rx-timeframe-list button svg{flex:0 0 auto;color:#17191c}
-.rx-chart-type-sheet{padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}
-.rx-chart-type-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-chart-type-list{padding-bottom:8px}.rx-chart-type-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-chart-type-list button span{display:flex;align-items:center;gap:14px}.rx-chart-type-list button:active{background:#f7f7f7}
+.rx-chart-sheet-overlay{position:fixed;inset:0;z-index:70;background:rgba(17,20,24,.38);touch-action:none}
+.rx-close-position-sheet,.rx-timeframe-sheet,.rx-chart-type-sheet{position:fixed;left:0;right:0;bottom:0;z-index:71;width:100%;max-height:92dvh;background:#fff;border-radius:26px 26px 0 0;box-shadow:0 -18px 50px rgba(17,20,24,.22);will-change:transform;touch-action:none;overflow:hidden;outline:none}
+.rx-close-position-sheet{padding:9px 31px calc(18px + env(safe-area-inset-bottom))}.rx-close-position-sheet h3{margin:16px 0 19px;font-size:21px;letter-spacing:-.3px}.rx-close-position-sheet>div{display:flex;align-items:center;justify-content:space-between;padding:7px 0;color:#747a80;font-size:14px}.rx-close-position-sheet>div b{color:#17191c;font-weight:500}.rx-close-position-confirm,.rx-close-position-cancel{width:100%;height:48px;border:0;border-radius:11px;margin-top:13px;font:500 14px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-close-position-confirm{background:#F4D35E;color:#111418}.rx-close-position-cancel{margin-top:9px;background:#f1f2f4;color:#272b2f}
+.rx-timeframe-sheet{height:min(78dvh,720px);padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}.rx-timeframe-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-timeframe-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch}.rx-timeframe-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-timeframe-list button:active{background:#f7f7f7}.rx-timeframe-list button svg{flex:0 0 auto;color:#17191c}
+.rx-chart-type-sheet{padding:9px 0 calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column}.rx-chart-type-sheet h3{margin:22px 31px 18px;font-size:25px;letter-spacing:-.4px}.rx-chart-type-list{padding-bottom:8px}.rx-chart-type-list button{width:100%;height:59px;padding:0 31px;border:0;background:#fff;color:#17191c;display:flex;align-items:center;justify-content:space-between;text-align:left;font:400 16px -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}.rx-chart-type-list button span{display:flex;align-items:center;gap:14px}.rx-chart-type-list button:active{background:#f7f7f7}
 .rx-chart-fullscreen-exit{position:absolute;z-index:100;top:calc(14px + env(safe-area-inset-top));left:12px;width:40px;height:40px;border:0;border-radius:20px;background:#f2f3f4;color:#111418;display:grid;place-items:center}
 
 `;
