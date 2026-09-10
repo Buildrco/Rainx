@@ -1925,27 +1925,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
-  const chartPullGuardRef = useRef(null);
-  const handleChartTouchStart = useCallback((e) => {
-    const touch = e.touches?.[0];
-    if (!touch) return;
-    chartPullGuardRef.current = { y: touch.clientY };
-  }, []);
-  const handleChartTouchMove = useCallback((e) => {
-    const start = chartPullGuardRef.current;
-    const touch = e.touches?.[0];
-    const target = e.target instanceof Element ? e.target : null;
-    if (!start || !touch || target?.closest?.("[class*=\"sheet\"]")) return;
-    if (touch.clientY - start.y > 8 && e.cancelable) e.preventDefault();
-  }, []);
-  const handleChartTouchEnd = useCallback(() => { chartPullGuardRef.current = null; }, []);
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
     style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none", touchAction: "pan-y" }}
-    onTouchStart={handleChartTouchStart}
-    onTouchMove={handleChartTouchMove}
-    onTouchEnd={handleChartTouchEnd}
-    onTouchCancel={handleChartTouchEnd}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
