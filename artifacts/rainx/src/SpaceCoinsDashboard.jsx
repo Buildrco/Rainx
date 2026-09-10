@@ -530,7 +530,7 @@ function CreateCoin({ onBack, onCreated }) {
     };
   }, []);
 
-  const [form, setForm = useState({
+  const [form, setForm] = useState({
     name: "",
     symbol: "",
     description: "",
