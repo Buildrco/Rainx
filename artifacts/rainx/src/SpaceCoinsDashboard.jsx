@@ -928,7 +928,7 @@ const menuItems = [
   [Share2, "Share Token"],
 ];
 
-function MenuScreen({ onBack, onDashboard, onSelect }) {
+function MenuScreen({ onBack, onDashboard, onFunds, onSelect }) {
   const groups = [menuItems.slice(0, 2), menuItems.slice(2, 5), menuItems.slice(5)];
   const swipe = useHorizontalSwipe(undefined, onBack);
   return (
@@ -938,7 +938,7 @@ function MenuScreen({ onBack, onDashboard, onSelect }) {
       <div className="rx-menu-content">
         <div className="rx-menu-feature-grid">
           <button className="rx-menu-feature" onClick={onDashboard}><span className="rx-menu-feature-icon"><Home size={25} /></span><strong>Dashboard</strong></button>
-          <button className="rx-menu-feature" onClick={onDashboard}><span className="rx-menu-feature-icon"><BriefcaseBusiness size={25} /></span><strong>Funds</strong></button>
+          <button className="rx-menu-feature" onClick={onFunds || onDashboard}><span className="rx-menu-feature-icon"><BriefcaseBusiness size={25} /></span><strong>Funds</strong></button>
         </div>
         <div className="rx-menu-groups">
           {groups.map((group, groupIndex) => <section className="rx-menu-group" key={groupIndex}><h2 className="rx-menu-section-label">{["Support", "Token", "Activity"][groupIndex]}</h2><div className="rx-menu-list">{group.map(([Icon, label]) => <button key={label} onClick={() => onSelect(label)}><span className="rx-menu-list-icon"><Icon size={22} strokeWidth={2.2} /></span><span>{label}</span><ChevronRight size={21} /></button>)}</div></section>)}
@@ -2704,7 +2704,7 @@ export default function SpaceCoinsDashboard({ onBack }) {
     return <CreateCoin onBack={() => setScreen("dashboard")} onCreated={(coin) => { setCoins((current) => [coin, ...current.filter((item) => item.id !== coin.id)]); setScreen("dashboard"); }} />;
   }
   if (screen === "menu") {
-    return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("liquidity-dashboard")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
+    return <MenuScreen onBack={() => setScreen("dashboard")} onDashboard={() => setScreen("liquidity-dashboard")} onFunds={() => setScreen("creator")} onSelect={(label) => setScreen({ "Token Settings": "token-settings", Analytics: "analytics", Holders: "holders", Transactions: "transactions", Notifications: "notifications" }[label] || "menu")} />;
   }
   if (screen === "liquidity-dashboard") {
     const activeCoin = selectedCoin || coins[0] || null;
