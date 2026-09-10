@@ -1173,15 +1173,16 @@ function CoinPriceChart({ coin, range, timeframe = "15m", chartType, entryLines 
       chart.resize(r?.width || el.clientWidth || 340, r?.height || el.clientHeight || 255);
     });
     ro.observe(el);
+    // TradingView-style behavior: every horizontal history move restores
+    // automatic scaling from the candles currently in the visible range.
     const handleVisibleRangeChange = () => {
       const scale = chart.priceScale("right");
-      if (scale) {
-        priceScaleMarginsRef.current = { top: 0.08, bottom: 0.08 };
-        scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
-      }
+      if (!scale) return;
+      priceScaleMarginsRef.current = { top: 0.08, bottom: 0.08 };
+      scale.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
       requestAnimationFrame(() => {
-        const currentScale = chart.priceScale("right");
-        currentScale?.applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
+        if (chartRef.current !== chart) return;
+        chart.priceScale("right").applyOptions({ autoScale: true, scaleMargins: priceScaleMarginsRef.current });
         updateEntryCoordinates();
       });
     };
@@ -1803,35 +1804,9 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
   const primaryOrder = openOrders[0];
   const primaryPnl = primaryOrder ? selectedPnl(primaryOrder) : 0;
-  const chartPullGuardRef = useRef(null);
-  const handleChartTouchStart = useCallback((e) => {
-    const touch = e.touches?.[0];
-    if (!touch) return;
-    chartPullGuardRef.current = { x: touch.clientX, y: touch.clientY, multi: (e.touches?.length || 0) > 1 };
-  }, []);
-  const handleChartTouchMove = useCallback((e) => {
-    const start = chartPullGuardRef.current;
-    if (!start || (e.touches?.length || 0) > 1) return;
-    const touch = e.touches?.[0];
-    if (!touch) return;
-    const dx = touch.clientX - start.x;
-    const dy = touch.clientY - start.y;
-    if (Math.abs(dy) > Math.abs(dx) + 8 && dy > 0) {
-      if (e.cancelable) e.preventDefault();
-      e.stopPropagation();
-    }
-  }, []);
-  const handleChartTouchEnd = useCallback(() => {
-    chartPullGuardRef.current = null;
-  }, []);
-
   return <main
     className={`rx-native-screen rx-coin-detail-screen${chartFullscreen ? " rx-chart-fullscreen" : ""}`}
-    style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none" }}
-    onTouchStartCapture={handleChartTouchStart}
-    onTouchMoveCapture={handleChartTouchMove}
-    onTouchEndCapture={handleChartTouchEnd}
-    onTouchCancelCapture={handleChartTouchEnd}
+    style={{ overscrollBehaviorY: "none", overscrollBehaviorX: "none", touchAction: "pan-y" }}
   >
     <style>{styles + createStyles + detailStyles}</style>
 
@@ -1953,7 +1928,7 @@ function CreatorDashboard({ onBack, onManage, coin }) {
 
 const detailStyles = `
 html:has(.rx-coin-detail-screen),body:has(.rx-coin-detail-screen),#root:has(.rx-coin-detail-screen){overscroll-behavior:none!important;overscroll-behavior-y:none!important;overflow:hidden!important}
-.rx-coin-detail-screen{background:#fff!important;color:#111418;overscroll-behavior:none!important;overscroll-behavior-y:none!important;overscroll-behavior-x:none!important;touch-action:none!important}
+.rx-coin-detail-screen{background:#fff!important;color:#111418;overscroll-behavior:none!important;overscroll-behavior-y:none!important;overscroll-behavior-x:none!important;touch-action:pan-y!important}
 .rx-detail-top{height:76px;flex:0 0 76px;padding:calc(8px + env(safe-area-inset-top)) 15px 0;display:grid;grid-template-columns:42px minmax(0,1fr) 42px;align-items:center;gap:8px}
 .rx-detail-back,.rx-detail-down{border:0;background:transparent;color:#111418;display:grid;place-items:center;padding:0;width:40px;height:40px}
 .rx-detail-wallet{display:flex;align-items:center;gap:8px;font-size:14px;min-width:0}.rx-detail-wallet strong{font-size:15px}.rx-detail-lock{font-size:13px}.rx-detail-status{width:38px;height:38px;border-radius:50%;background:#eff9df;color:#78b735;display:grid;place-items:center;font-size:16px}
