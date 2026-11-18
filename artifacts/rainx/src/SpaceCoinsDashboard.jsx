@@ -1066,11 +1066,294 @@ function NativeTabScreen({ title, onBack, children, right }) {
   return <div className="rx-native-screen rx-tab-screen" {...swipe}><style>{styles}</style><NativeHeader title={title} onBack={onBack} right={right} /><div className="rx-native-scroll">{children}</div><NativeTabs active="Space Coins" /></div>;
 }
 
-function TokenSettingsScreen({ onBack }) {
-  const rows = [["Token Information", "Edit name, symbol, description"], ["Fee Settings", "Manage trading fees and creator fees", "2%"], ["Max Transaction", "Set max buy/sell limit", "No Limit"], ["Max Wallet", "Set max tokens per wallet", "No Limit"], ["Trading Settings", "Enable / Disable trading"], ["Whitelist", "Manage whitelisted addresses", "12"], ["Blacklist", "Manage blacklisted addresses", "0"], ["Token Visibility", "Show or hide your token"], ["Burn Tokens", "Burn a portion of supply"]];
-  return <NativeTabScreen title="Token Settings" onBack={onBack}><div className="rx-token-summary"><img src={galaxyDogeToken} alt="" /><div><strong>STAR DOGE</strong><small>SDOGE</small></div><span className="rx-live-pill">Live</span></div><div className="rx-settings-list">{rows.map(([name, detail, value], index) => <div className="rx-settings-row" key={name}><span className="rx-settings-icon">{["ⓘ", "⚙", "◷", "▣", "◉", "ⓘ", "ⓧ", "◉", "♨"][index]}</span><div><strong>{name}</strong><small>{detail}</small></div>{value ? <em>{value}</em> : index === 4 || index === 7 ? <span className="rx-switch on" /> : <ChevronRight size={17} />}</div>)}</div></NativeTabScreen>;
+const TOKEN_SETTINGS_DEFAULTS = {
+  buy_fee_bps: 0,
+  sell_fee_bps: 0,
+  creator_fee_bps: 0,
+  max_transaction_pct: null,
+  max_wallet_pct: null,
+  trading_enabled: true,
+  whitelist_enabled: false,
+  blacklist_enabled: false,
+  whitelist_user_ids: [],
+  blacklist_user_ids: [],
+};
+
+const tokenSettingsStyles = `
+.rx-token-settings{display:flex;flex-direction:column;gap:14px;padding-bottom:18px}
+.rx-settings-coin-picker{display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #e8e8e8;border-radius:12px;background:#fff}
+.rx-settings-coin-picker label{font-size:11px;color:#70757a;white-space:nowrap}
+.rx-settings-coin-picker select{flex:1;min-width:0;border:0;background:transparent;color:#17191c;font-size:13px;font-weight:700;outline:none}
+.rx-settings-market-note{padding:10px 12px;border-radius:10px;background:#fff8e7;color:#70530b;font-size:10px;line-height:1.5}
+.rx-settings-status{padding:9px 11px;border-radius:9px;background:#f3f5f7;color:#4e555d;font-size:11px;line-height:1.45}
+.rx-settings-empty{padding:26px 18px;border:1px dashed #d8d8d8;border-radius:12px;background:#fff;text-align:center;display:flex;flex-direction:column;gap:8px;color:#6b7076;font-size:12px}
+.rx-settings-empty strong{font-size:14px;color:#222}
+.rx-token-settings .rx-settings-list{margin-bottom:4px}
+.rx-token-settings .rx-settings-row{width:100%;text-align:left;background:#fff;border-left:0;border-right:0;border-top:0;cursor:pointer}
+.rx-token-settings .rx-settings-row:active{background:#f8f8f8}
+.rx-settings-row em{max-width:46%;overflow:hidden;text-overflow:ellipsis}
+.rx-token-modal-backdrop{position:fixed;inset:0;z-index:10000;display:flex;align-items:flex-end;justify-content:center;background:rgba(12,16,21,.55);padding:12px 10px calc(12px + env(safe-area-inset-bottom))}
+.rx-token-modal{width:min(100%,520px);max-height:90dvh;overflow:auto;background:#fff;border-radius:20px;padding:18px 16px 16px;box-shadow:0 20px 70px rgba(0,0,0,.25)}
+.rx-token-modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:14px}
+.rx-token-modal-head h2{margin:0;font-size:18px;color:#17191c}
+.rx-token-modal-head p{margin:5px 0 0;color:#70757a;font-size:11px;line-height:1.45}
+.rx-token-modal-close{width:34px;height:34px;border:0;border-radius:50%;background:#f2f3f4;color:#25282b;font-size:22px;line-height:1;cursor:pointer}
+.rx-token-fields,.rx-settings-fields{display:flex;flex-direction:column;gap:12px}
+.rx-settings-field{display:flex;flex-direction:column;gap:6px;color:#42474c;font-size:11px;font-weight:600}
+.rx-settings-field input,.rx-settings-field textarea{width:100%;box-sizing:border-box;border:1px solid #dfe2e5;border-radius:10px;padding:11px 12px;background:#fff;color:#17191c;font:inherit;font-size:13px;outline:none}
+.rx-settings-field input:focus,.rx-settings-field textarea:focus{border-color:#c89116;box-shadow:0 0 0 2px rgba(200,145,22,.12)}
+.rx-settings-field textarea{min-height:116px;resize:vertical;line-height:1.5}
+.rx-settings-help{color:#7b8085;font-size:10px;font-weight:400;line-height:1.45}
+.rx-settings-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 0;border-bottom:1px solid #eee;color:#25282b;font-size:13px;font-weight:600}
+.rx-settings-toggle-row small{display:block;margin-top:4px;color:#757b81;font-size:10px;font-weight:400;line-height:1.4}
+.rx-settings-toggle{flex:none;width:44px;height:26px;border:0;border-radius:15px;background:#d6d9dc;padding:3px;cursor:pointer;transition:background .15s}
+.rx-settings-toggle:after{content:"";display:block;width:20px;height:20px;border-radius:50%;background:white;transition:transform .15s;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.rx-settings-toggle[aria-checked="true"]{background:#d49b12}
+.rx-settings-toggle[aria-checked="true"]:after{transform:translateX(18px)}
+.rx-settings-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.rx-settings-detail{min-width:0;padding:10px;border:1px solid #eceef0;border-radius:10px;background:#fafafa}
+.rx-settings-detail small,.rx-settings-detail strong{display:block;overflow-wrap:anywhere}
+.rx-settings-detail small{font-size:9px;color:#7a8086}
+.rx-settings-detail strong{margin-top:5px;font-size:11px;color:#24282b}
+.rx-token-modal-error{padding:10px 12px;border-radius:9px;background:#fff0ef;color:#a32f25;font-size:11px;line-height:1.4}
+.rx-token-modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+.rx-token-modal-actions button{min-height:40px;border:1px solid #e0e2e4;border-radius:10px;padding:0 15px;background:#fff;color:#303438;font-size:12px;font-weight:700;cursor:pointer}
+.rx-token-modal-actions .primary{border-color:#bd8815;background:#c89316;color:#fff}
+.rx-token-modal-actions button:disabled{opacity:.55;cursor:wait}
+`;
+
+function formatSpaceCoinAmount(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "—";
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(amount);
 }
 
+function parseSpaceCoinUserIds(value) {
+  return [...new Set(String(value || "").split(/[\n,;]+/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function TokenSettingsScreen({ onBack, coins = [], selectedCoin, coinsLoaded, onUpdated }) {
+  const [userId, setUserId] = useState(null);
+  const [coinSelection, setCoinSelection] = useState("");
+  const [coinDetails, setCoinDetails] = useState(null);
+  const [settings, setSettings] = useState(TOKEN_SETTINGS_DEFAULTS);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [panel, setPanel] = useState(null);
+  const [form, setForm] = useState(null);
+  const [notice, setNotice] = useState("");
+  const [panelError, setPanelError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    supabase.auth.getUser().then(({ data }) => {
+      if (active) setUserId(data?.user?.id || null);
+    }).catch(() => { if (active) setUserId(null); });
+    return () => { active = false; };
+  }, []);
+
+  const ownedCoins = useMemo(() => (coins || []).filter((item) => userId && item.creator_id === userId), [coins, userId]);
+  const preferredCoinId = ownedCoins.some((item) => item.id === selectedCoin?.id)
+    ? selectedCoin.id
+    : ownedCoins[0]?.id;
+  const activeCoinId = ownedCoins.some((item) => item.id === coinSelection) ? coinSelection : preferredCoinId;
+  const activeCoin = ownedCoins.find((item) => item.id === activeCoinId) || null;
+  const displayCoin = coinDetails?.id === activeCoin?.id ? coinDetails : activeCoin;
+
+  useEffect(() => {
+    if (!activeCoin) {
+      setCoinDetails(null);
+      setSettings(TOKEN_SETTINGS_DEFAULTS);
+      setLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setCoinDetails(activeCoin);
+    setSettings(TOKEN_SETTINGS_DEFAULTS);
+    setLoading(true);
+    setNotice("");
+    supabase.rpc("get_space_coin_settings", { p_coin_id: activeCoin.id }).then(({ data, error }) => {
+      if (!active) return;
+      if (error) {
+        setNotice(error.message || "Unable to load this coin's settings.");
+      } else {
+        setCoinDetails(data?.coin || activeCoin);
+        setSettings({ ...TOKEN_SETTINGS_DEFAULTS, ...(data?.settings || {}) });
+      }
+      setLoading(false);
+    }).catch((error) => {
+      if (!active) return;
+      setNotice(error?.message || "Unable to load this coin's settings.");
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, [activeCoin?.id]);
+
+  const openPanel = (key) => {
+    if (!displayCoin || loading) return;
+    setPanelError("");
+    setForm({
+      name: displayCoin.name || "",
+      symbol: displayCoin.symbol || "",
+      description: displayCoin.description || "",
+      buy_fee_pct: (Number(settings.buy_fee_bps || 0) / 100).toFixed(2),
+      sell_fee_pct: (Number(settings.sell_fee_bps || 0) / 100).toFixed(2),
+      creator_fee_pct: (Number(settings.creator_fee_bps || 0) / 100).toFixed(2),
+      max_transaction_pct: settings.max_transaction_pct == null ? "" : String(settings.max_transaction_pct),
+      max_wallet_pct: settings.max_wallet_pct == null ? "" : String(settings.max_wallet_pct),
+      trading_enabled: settings.trading_enabled !== false,
+      is_visible: displayCoin.is_visible !== false,
+      whitelist_enabled: settings.whitelist_enabled === true,
+      blacklist_enabled: settings.blacklist_enabled === true,
+      whitelist_user_ids: (settings.whitelist_user_ids || []).join("\n"),
+      blacklist_user_ids: (settings.blacklist_user_ids || []).join("\n"),
+    });
+    setPanel(key);
+  };
+
+  const setField = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const setPercent = (value) => {
+    const text = String(value ?? "").trim();
+    if (!text) return null;
+    const number = Number(text);
+    return Number.isFinite(number) ? number : null;
+  };
+  const tokenLimit = (percent) => {
+    const value = Number(displayCoin?.total_supply || 0) * Number(percent || 0) / 100;
+    return `${formatSpaceCoinAmount(value)} ${displayCoin?.symbol || "tokens"}`;
+  };
+
+  const saveChanges = async () => {
+    if (!form || !displayCoin?.id || saving) return;
+    const symbol = String(form.symbol || "").trim().toUpperCase();
+    const name = String(form.name || "").trim();
+    if (!name || name.length > 60) return setPanelError("Enter a token name up to 60 characters.");
+    if (!/^[A-Z0-9]{2,12}$/.test(symbol)) return setPanelError("Use 2–12 letters or numbers for the token symbol.");
+    const feeValues = [form.buy_fee_pct, form.sell_fee_pct, form.creator_fee_pct].map(Number);
+    if (feeValues.some((value) => !Number.isFinite(value) || value < 0 || value > 10)) return setPanelError("Each fee must be between 0% and 10%.");
+    const maxTransaction = setPercent(form.max_transaction_pct);
+    const maxWallet = setPercent(form.max_wallet_pct);
+    if ([maxTransaction, maxWallet].some((value) => value != null && (value <= 0 || value > 100))) return setPanelError("Limits must be greater than 0% and no more than 100%, or left blank for no limit.");
+    const whitelistIds = parseSpaceCoinUserIds(form.whitelist_user_ids);
+    const blacklistIds = parseSpaceCoinUserIds(form.blacklist_user_ids);
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if ([...whitelistIds, ...blacklistIds].some((id) => !uuidPattern.test(id))) return setPanelError("Use RainX account UUIDs, one per line. This market does not identify traders by blockchain wallet address.");
+    setSaving(true);
+    setPanelError("");
+    try {
+      const payload = {
+        buy_fee_bps: Math.round(feeValues[0] * 100),
+        sell_fee_bps: Math.round(feeValues[1] * 100),
+        creator_fee_bps: Math.round(feeValues[2] * 100),
+        max_transaction_pct: maxTransaction,
+        max_wallet_pct: maxWallet,
+        trading_enabled: Boolean(form.trading_enabled),
+        whitelist_enabled: Boolean(form.whitelist_enabled),
+        blacklist_enabled: Boolean(form.blacklist_enabled),
+        whitelist_user_ids: whitelistIds,
+        blacklist_user_ids: blacklistIds,
+      };
+      const { data, error } = await supabase.rpc("update_space_coin_settings", {
+        p_coin_id: displayCoin.id,
+        p_token_info: { name, symbol, description: String(form.description || "").trim() },
+        p_settings: payload,
+        p_is_visible: Boolean(form.is_visible),
+      });
+      if (error) throw error;
+      const updatedCoin = data?.coin || { ...displayCoin, name, symbol, description: String(form.description || "").trim(), is_visible: Boolean(form.is_visible) };
+      setCoinDetails(updatedCoin);
+      setSettings({ ...TOKEN_SETTINGS_DEFAULTS, ...(data?.settings || payload) });
+      onUpdated?.(updatedCoin);
+      setNotice("Settings saved.");
+      setPanel(null);
+    } catch (error) {
+      setPanelError(error?.message || "Unable to save settings. Check the market settings migration and try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const percentLabel = (value) => value == null ? "No limit" : `${Number(value)}% · ${tokenLimit(value)}`;
+  const rows = [
+    ["info", "Token Information", "Name, symbol, supply, network and market data", displayCoin ? `${displayCoin.symbol} · ${displayCoin.network || "Network not set"}` : "—", "ⓘ"],
+    ["fees", "Fee Settings", "Buy, sell and creator fees", `Buy ${Number(settings.buy_fee_bps || 0) / 100}% · Sell ${Number(settings.sell_fee_bps || 0) / 100}% · Creator ${Number(settings.creator_fee_bps || 0) / 100}%`, "⚙"],
+    ["max_transaction", "Max Transaction", "Maximum order size as a share of supply", percentLabel(settings.max_transaction_pct), "◷"],
+    ["max_wallet", "Max Wallet", "Maximum holdings as a share of supply", percentLabel(settings.max_wallet_pct), "▣"],
+    ["trading", "Trading Settings", "Pause or resume new trades", settings.trading_enabled === false ? "Paused" : "Enabled", "◉"],
+    ["whitelist", "Whitelist", "Allow selected RainX accounts to trade", `${settings.whitelist_enabled ? "On" : "Off"} · ${(settings.whitelist_user_ids || []).length} accounts`, "ⓘ"],
+    ["blacklist", "Blacklist", "Block selected RainX accounts from trading", `${settings.blacklist_enabled ? "On" : "Off"} · ${(settings.blacklist_user_ids || []).length} accounts`, "ⓧ"],
+    ["visibility", "Token Visibility", "Show or hide this coin in the market", displayCoin?.is_visible === false ? "Hidden" : "Public", "◉"],
+    ["burn", "Burn Tokens", "On-chain burn is not supported for this market", "Unavailable", "♨"],
+  ];
+
+  const renderToggle = (key, label, detail) => (
+    <div className="rx-settings-toggle-row" key={key}>
+      <div>{label}<small>{detail}</small></div>
+      <button type="button" className="rx-settings-toggle" role="switch" aria-checked={Boolean(form?.[key])} onClick={() => setField(key, !form?.[key])} />
+    </div>
+  );
+  const renderPanel = () => {
+    if (!form || !displayCoin) return null;
+    if (panel === "burn") return <div className="rx-settings-status">Space Coins are internal market balances in this app, not on-chain tokens. There is no token contract to burn, so this action is intentionally unavailable rather than simulating a burn.</div>;
+    if (panel === "info") return <>
+      <div className="rx-settings-fields">
+        <label className="rx-settings-field">Token name<input value={form.name} maxLength={60} onChange={(event) => setField("name", event.target.value)} /></label>
+        <label className="rx-settings-field">Symbol<input value={form.symbol} maxLength={12} onChange={(event) => setField("symbol", event.target.value)} /></label>
+        <label className="rx-settings-field">Description<textarea value={form.description} maxLength={500} onChange={(event) => setField("description", event.target.value)} /></label>
+      </div>
+      <div className="rx-settings-detail-grid" style={{ marginTop: 14 }}>
+        {[["Space Coin ID", displayCoin.id], ["Network", displayCoin.network || "Not set"], ["Total supply", `${formatSpaceCoinAmount(displayCoin.total_supply)} ${displayCoin.symbol}`], ["Initial price", displayCoin.initial_price == null ? "—" : `$${formatSpaceCoinAmount(displayCoin.initial_price)}`], ["Current price", displayCoin.current_price == null ? "—" : `$${formatSpaceCoinAmount(displayCoin.current_price)}`], ["Market cap", displayCoin.market_cap == null ? "—" : `$${formatSpaceCoinAmount(displayCoin.market_cap)}`], ["24h volume", displayCoin.volume_24h == null ? "—" : `$${formatSpaceCoinAmount(displayCoin.volume_24h)}`], ["Holders", formatSpaceCoinAmount(displayCoin.holder_count)], ["Status", displayCoin.status || "—"]].map(([label, value]) => <div className="rx-settings-detail" key={label}><small>{label}</small><strong>{value}</strong></div>)}
+      </div>
+    </>;
+    if (panel === "fees") return <div className="rx-token-fields">
+      <label className="rx-settings-field">Buy fee (%)<input type="number" min="0" max="10" step="0.01" value={form.buy_fee_pct} onChange={(event) => setField("buy_fee_pct", event.target.value)} /></label>
+      <label className="rx-settings-field">Sell fee (%)<input type="number" min="0" max="10" step="0.01" value={form.sell_fee_pct} onChange={(event) => setField("sell_fee_pct", event.target.value)} /></label>
+      <label className="rx-settings-field">Creator share (%)<input type="number" min="0" max="10" step="0.01" value={form.creator_fee_pct} onChange={(event) => setField("creator_fee_pct", event.target.value)} /><small className="rx-settings-help">Applied to completed market orders and credited to the coin creator's RainX account.</small></label>
+      <small className="rx-settings-help">Platform buy/sell fees are charged on entry and close. The creator share is additional and recorded to the creator's market balance.</small>
+    </div>;
+    if (panel === "max_transaction" || panel === "max_wallet") {
+      const key = panel === "max_transaction" ? "max_transaction_pct" : "max_wallet_pct";
+      const label = panel === "max_transaction" ? "Maximum transaction (% of total supply)" : "Maximum wallet (% of total supply)";
+      const pct = setPercent(form[key]);
+      return <div className="rx-token-fields">
+        <label className="rx-settings-field">{label}<input type="number" min="0.01" max="100" step="0.01" placeholder="Blank = no limit" value={form[key]} onChange={(event) => setField(key, event.target.value)} /></label>
+        <small className="rx-settings-help">{pct == null ? "No cap is applied unless you set a percentage." : `For ${formatSpaceCoinAmount(displayCoin.total_supply)} total supply, the limit is ${tokenLimit(pct)}.`} Limits are enforced by the Space Coin trade engine; closing positions remains available.</small>
+      </div>;
+    }
+    if (panel === "trading") return <>{renderToggle("trading_enabled", "Allow new trades", "When paused, new buys and sells are rejected. Existing positions can still be closed.")}</>;
+    if (panel === "whitelist" || panel === "blacklist") {
+      const whitelist = panel === "whitelist";
+      const enabledKey = whitelist ? "whitelist_enabled" : "blacklist_enabled";
+      const idsKey = whitelist ? "whitelist_user_ids" : "blacklist_user_ids";
+      return <>
+        {renderToggle(enabledKey, whitelist ? "Require allowlisted accounts" : "Block denylisted accounts", whitelist ? "Only listed RainX account IDs may place new trades." : "Listed RainX account IDs cannot place new trades.")}
+        <label className="rx-settings-field" style={{ marginTop: 14 }}>{whitelist ? "Allowed RainX account UUIDs" : "Blocked RainX account UUIDs"}<textarea placeholder="One account UUID per line" value={form[idsKey]} onChange={(event) => setField(idsKey, event.target.value)} /><small className="rx-settings-help">This market identifies traders by their RainX account, not a blockchain wallet address.</small></label>
+      </>;
+    }
+    if (panel === "visibility") return <>{renderToggle("is_visible", "Show in the Space Coins market", "Hidden coins remain manageable by their creator but are removed from the public coin feed.")}</>;
+    return null;
+  };
+
+  return <NativeTabScreen title="Token Settings" onBack={onBack}>
+    <style>{tokenSettingsStyles}</style>
+    <div className="rx-token-settings">
+      {ownedCoins.length > 1 && <div className="rx-settings-coin-picker"><label htmlFor="rx-settings-coin">Creator coin</label><select id="rx-settings-coin" value={activeCoin?.id || ""} onChange={(event) => setCoinSelection(event.target.value)}>{ownedCoins.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.symbol})</option>)}</select></div>}
+      {!displayCoin ? <div className="rx-settings-empty"><strong>{!coinsLoaded ? "Loading creator coins…" : userId ? "No creator coin found" : "Sign in to manage token settings"}</strong><span>{!coinsLoaded ? "Syncing your Space Coins." : "Token settings are available only to the creator of a Space Coin."}</span></div> : <>
+        <div className="rx-token-summary"><img src={displayCoin.image_url || galaxyDogeToken} alt="" /><div><strong>{displayCoin.name}</strong><small>{displayCoin.symbol} · {displayCoin.network || "Network not set"}</small></div><span className="rx-live-pill">{displayCoin.status === "live" ? "Live" : displayCoin.status || "Draft"}</span></div>
+        <div className="rx-settings-market-note">These controls apply to RainX's Supabase-backed Space Coin market. This app does not deploy or manage on-chain token contracts.</div>
+        {loading && <div className="rx-settings-status">Loading settings…</div>}
+        {!loading && notice && <div className="rx-settings-status" role="status">{notice}</div>}
+        <div className="rx-settings-list">{rows.map(([key, name, detail, value, icon]) => <button className="rx-settings-row" type="button" key={key} disabled={loading} onClick={() => openPanel(key)}><span className="rx-settings-icon">{icon}</span><span><strong>{name}</strong><small>{detail}</small></span><em>{value}</em><ChevronRight size={17} /></button>)}</div>
+      </>}
+    </div>
+    {panel && <div className="rx-token-modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget && !saving) setPanel(null); }}><section className="rx-token-modal" role="dialog" aria-modal="true" aria-labelledby="rx-token-modal-title">
+      <div className="rx-token-modal-head"><div><h2 id="rx-token-modal-title">{rows.find(([key]) => key === panel)?.[1] || "Token Settings"}</h2><p>{displayCoin?.name} ({displayCoin?.symbol}) · changes affect this coin only</p></div><button type="button" className="rx-token-modal-close" aria-label="Close" onClick={() => !saving && setPanel(null)}>×</button></div>
+      {panelError && <div className="rx-token-modal-error" role="alert">{panelError}</div>}
+      {renderPanel()}
+      <div className="rx-token-modal-actions"><button type="button" onClick={() => setPanel(null)} disabled={saving}>{panel === "burn" ? "Close" : "Cancel"}</button>{panel !== "burn" && <button type="button" className="primary" onClick={saveChanges} disabled={saving || loading}>{saving ? "Saving…" : "Save changes"}</button>}</div>
+    </section></div>}
+  </NativeTabScreen>;
+}
 function HoldersScreen({ onBack }) {
   const holders = [["7xK...9a3b", "8.45%", "84,500,000"], ["GdL...8kL2", "6.21%", "62,100,000"], ["Fh3...9mN7", "4.32%", "43,200,000"], ["9dA...3jK1", "3.85%", "38,500,000"], ["HkL...2pQ8", "2.98%", "29,800,000"], ["Js9...7aD4", "2.41%", "24,100,000"], ["2kM...8xP6", "1.89%", "18,900,000"], ["9nB...1dQ2", "1.52%", "15,200,000"], ["Kd3...9pZ1", "1.33%", "13,300,000"], ["8sL...6mT5", "1.29%", "12,900,000"]];
   return <NativeTabScreen title="Holders" onBack={onBack} right={<CircleHelp size={18} />}><div className="rx-holders-number"><span className="rx-creator-number">5</span><strong>Holders</strong></div><div className="rx-stat-grid"><span><small>Total Holders</small><b>2,845</b></span><span><small>Top 10 Holders</small><b>32.45%</b></span><span><small>Total Supply</small><b>1B SDOGE</b></span></div><div className="rx-tab-switch"><b>Top Holders</b><span>All Holders</span></div><div className="rx-holder-list">{holders.map(([address, share, amount], i) => <div key={address}><i>{i + 1}</i><strong>{address}</strong><span>{share}</span><b>{amount}</b></div>)}</div></NativeTabScreen>;
@@ -2725,6 +3008,8 @@ export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
   const [coinActivity, setCoinActivity] = useState({});
   const [selectedCoin, setSelectedCoin] = useState(null);
   const [coinsLoaded, setCoinsLoaded] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const visibleCoins = useMemo(() => coins.filter((coin) => coin.is_visible !== false || coin.creator_id === currentUserId), [coins, currentUserId]);
 
   const handleNativeBack = useCallback(() => {
     if (overlay) {
@@ -2750,6 +3035,14 @@ export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
     }
     return false;
   }, [overlay, screen]);
+
+  useEffect(() => {
+    let active = true;
+    supabase.auth.getUser().then(({ data }) => {
+      if (active) setCurrentUserId(data?.user?.id || null);
+    }).catch(() => { if (active) setCurrentUserId(null); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => registerNativeBackHandler(handleNativeBack, "space-coins"), [handleNativeBack]);
 
@@ -2850,7 +3143,16 @@ export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
     </>;
   }
   if (screen === "token-settings") {
-    return <TokenSettingsScreen onBack={() => setScreen("menu")} />;
+    return <TokenSettingsScreen
+      onBack={() => setScreen("menu")}
+      coins={coins}
+      selectedCoin={selectedCoin}
+      coinsLoaded={coinsLoaded}
+      onUpdated={(updatedCoin) => {
+        setCoins((current) => current.map((coin) => coin.id === updatedCoin.id ? { ...coin, ...updatedCoin } : coin));
+        setSelectedCoin((current) => current?.id === updatedCoin.id ? { ...current, ...updatedCoin } : current);
+      }}
+    />;
   }
   if (screen === "holders") {
     return <HoldersScreen onBack={() => setScreen("menu")} />;
@@ -2875,7 +3177,7 @@ export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
         onMenu={() => setScreen("menu")}
         onMyCoins={() => setOverlay("coins")}
         onConnect={() => setOverlay("wallet")}
-        coins={coins}
+        coins={visibleCoins}
         coinsLoaded={coinsLoaded}
         coinActivity={coinActivity}
         onSelectCoin={(coin) => { setSelectedCoin(coin); setScreen("creator"); }}
@@ -2886,7 +3188,7 @@ export default function SpaceCoinsDashboard({ onBack, onChartScreenChange }) {
       )}
 
       {overlay === "coins" && (
-        <MyCoinsSheet coins={coins} onClose={() => setOverlay(null)} />
+        <MyCoinsSheet coins={visibleCoins} onClose={() => setOverlay(null)} />
       )}
 
     </>
